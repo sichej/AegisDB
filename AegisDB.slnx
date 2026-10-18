@@ -3,4 +3,7 @@
     <Project Path="src/AegisDB.Core/AegisDB.Core.csproj" />
     <Project Path="src/AegisDB.Server/AegisDB.Server.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/AegisDB.Tests/AegisDB.Tests.csproj" />
+  </Folder>
 </Solution>
