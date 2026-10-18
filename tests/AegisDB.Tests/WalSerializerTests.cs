@@ -21,4 +21,22 @@ public class WalSerializerTests
         Assert.Equal(original.Key, restored.Key);
         Assert.Equal(original.Value, restored.Value);
     }
+
+    [Fact]
+    public void Deserialize_CorruptedData_ShouldThrowException()
+    {
+        var record = new WalRecord(
+            WalOperation.Put,
+            "user:1",
+            Encoding.UTF8.GetBytes("Alice")
+        );
+
+        byte[] serialized = WalSerializer.Serialize(record);
+
+        // Corrupt one byte in the value without updating the checksum.
+        serialized[20] ^= 0xFF;
+
+        Assert.Throws<InvalidDataException>(() =>
+            WalSerializer.Deserialize(serialized));
+    }
 }
