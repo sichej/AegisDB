@@ -105,4 +105,116 @@ public sealed class WriteAheadLog
 
         return records;
     }
+
+    /// <summary>
+    /// Reads the WAL and returns all complete, validated records.
+    ///
+    /// An incomplete final record is reported without being applied.
+    /// Invalid record lengths and checksum failures stop recovery.
+    ///
+    /// This method does not modify the WAL file and must not run
+    /// concurrently with append operations.
+    /// </summary>
+    public async Task<WalReadResult> ReadForRecoveryAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var records = new List<WalRecord>();
+
+        if (!File.Exists(_filePath))
+            return new WalReadResult(records, 0, false);
+
+        await using var stream = new FileStream(
+            _filePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            bufferSize: 4096,
+            useAsync: true
+        );
+
+        long lastValidOffset = 0;
+
+        const int minRecordLength = 13;
+        const int maxRecordLength = 16 * 1024 * 1024;
+
+        while (stream.Position < stream.Length)
+        {
+            long recordStart = stream.Position;
+            long remainingBytes = stream.Length - recordStart;
+
+            // A complete length prefix requires four bytes.
+            if (remainingBytes < sizeof(int))
+            {
+                return new WalReadResult(
+                    records,
+                    lastValidOffset,
+                    true
+                );
+            }
+
+            byte[] lengthBuffer = new byte[sizeof(int)];
+
+            await stream.ReadExactlyAsync(
+                lengthBuffer,
+                cancellationToken
+            );
+
+            int recordLength = BitConverter.ToInt32(lengthBuffer);
+
+            // Invalid metadata is treated as corruption, not as
+            // a recoverable incomplete write.
+            if (recordLength < minRecordLength ||
+                recordLength > maxRecordLength)
+            {
+                throw new InvalidDataException(
+                    $"Invalid WAL record length at offset {recordStart}."
+                );
+            }
+
+            long totalRecordLength = sizeof(int) + (long)recordLength;
+
+            // The declared record extends beyond the end of the file.
+            if (remainingBytes < totalRecordLength)
+            {
+                return new WalReadResult(
+                    records,
+                    lastValidOffset,
+                    true
+                );
+            }
+
+            byte[] recordBytes = new byte[(int)totalRecordLength];
+
+            lengthBuffer.CopyTo(recordBytes, 0);
+
+            await stream.ReadExactlyAsync(
+                recordBytes.AsMemory(sizeof(int), recordLength),
+                cancellationToken
+            );
+
+            try
+            {
+                // Deserialize validates the record structure and CRC32.
+                WalRecord record = WalSerializer.Deserialize(recordBytes);
+
+                records.Add(record);
+            }
+            catch (InvalidDataException ex)
+            {
+                throw new InvalidDataException(
+                    $"Corrupted WAL record at offset {recordStart}.",
+                    ex
+                );
+            }
+
+            // Only advance after the complete record has been validated.
+            lastValidOffset = stream.Position;
+        }
+
+        return new WalReadResult(
+            records,
+            lastValidOffset,
+            false
+        );
+    }
 }

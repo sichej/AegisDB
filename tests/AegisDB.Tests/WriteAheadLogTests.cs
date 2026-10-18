@@ -95,4 +95,68 @@ public class WriteAheadLogTests
                 File.Delete(filePath);
         }
     }
+
+    [Fact]
+    public async Task ReadForRecoveryAsync_IncompleteTail_ShouldPreserveValidRecords()
+    {
+        string filePath = Path.Combine(
+            Path.GetTempPath(),
+            $"{Guid.NewGuid()}.wal"
+        );
+
+        try
+        {
+            var wal = new WriteAheadLog(filePath);
+
+            var first = new WalRecord(
+                WalOperation.Put,
+                "user:1",
+                Encoding.UTF8.GetBytes("Alice")
+            );
+
+            var second = new WalRecord(
+                WalOperation.Put,
+                "user:2",
+                Encoding.UTF8.GetBytes("Bob")
+            );
+
+            await wal.AppendAsync(first);
+
+            long lastValidOffset = new FileInfo(filePath).Length;
+
+            // Simulate a crash that interrupts the second record.
+            byte[] serialized = WalSerializer.Serialize(second);
+            byte[] incomplete = serialized[..^5];
+
+            await using (var stream = new FileStream(
+                filePath,
+                FileMode.Append,
+                FileAccess.Write,
+                FileShare.None))
+            {
+                await stream.WriteAsync(incomplete);
+            }
+
+            var result = await wal.ReadForRecoveryAsync();
+
+            Assert.Single(result.Records);
+
+            Assert.Equal("user:1", result.Records[0].Key);
+            Assert.Equal(first.Value, result.Records[0].Value);
+
+            Assert.True(result.HasIncompleteTail);
+            Assert.Equal(lastValidOffset, result.LastValidOffset);
+
+            // Reading must not modify the original WAL.
+            Assert.Equal(
+                lastValidOffset + incomplete.Length,
+                new FileInfo(filePath).Length
+            );
+        }
+        finally
+        {
+            if (File.Exists(filePath))
+                File.Delete(filePath);
+        }
+    }
 }
