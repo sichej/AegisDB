@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/AegisDB.Core/AegisDB.Core.csproj" />
+    <Project Path="src/AegisDB.Server/AegisDB.Server.csproj" />
   </Folder>
 </Solution>
