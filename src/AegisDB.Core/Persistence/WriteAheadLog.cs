@@ -217,4 +217,48 @@ public sealed class WriteAheadLog
             false
         );
     }
+
+    /// <summary>
+    /// Truncates the WAL to the last validated record boundary.
+    ///
+    /// This operation must only run during recovery, before the database
+    /// starts accepting client requests.
+    /// </summary>
+    public async Task RepairAsync(
+        long lastValidOffset,
+        CancellationToken cancellationToken = default)
+    {
+        await _writeLock.WaitAsync(cancellationToken);
+
+        try
+        {
+            await using var stream = new FileStream(
+                _filePath,
+                FileMode.Open,
+                FileAccess.ReadWrite,
+                FileShare.None,
+                bufferSize: 4096,
+                useAsync: true
+            );
+
+            if (lastValidOffset < 0 ||
+                lastValidOffset > stream.Length)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(lastValidOffset),
+                    "Offset must be within WAL file boundaries."
+                );
+            }
+
+            // Remove all bytes after the last validated record.
+            stream.SetLength(lastValidOffset);
+
+            // Request that the truncation is persisted to storage.
+            stream.Flush(flushToDisk: true);
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
 }

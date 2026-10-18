@@ -69,6 +69,8 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
+// Reports readiness after database recovery has completed.
+app.MapGet("/health", () => Results.Ok("Healthy"));
 
 app.Run();
 

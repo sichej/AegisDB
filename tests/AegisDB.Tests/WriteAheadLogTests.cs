@@ -159,4 +159,76 @@ public class WriteAheadLogTests
                 File.Delete(filePath);
         }
     }
+
+    [Fact]
+    public async Task RepairAsync_ShouldRemoveIncompleteTail()
+    {
+        string filePath = Path.Combine(
+            Path.GetTempPath(),
+            $"{Guid.NewGuid()}.wal"
+        );
+
+        try
+        {
+            var wal = new WriteAheadLog(filePath);
+
+            var first = new WalRecord(
+                WalOperation.Put,
+                "user:1",
+                Encoding.UTF8.GetBytes("Alice")
+            );
+
+            var second = new WalRecord(
+                WalOperation.Put,
+                "user:2",
+                Encoding.UTF8.GetBytes("Bob")
+            );
+
+            await wal.AppendAsync(first);
+
+            // Save the offset of the last complete record.
+            long validOffset = new FileInfo(filePath).Length;
+
+            // Simulate an interrupted write.
+            byte[] incomplete = WalSerializer.Serialize(second)[..^5];
+
+            await using (var stream = new FileStream(
+                filePath,
+                FileMode.Append,
+                FileAccess.Write,
+                FileShare.None))
+            {
+                await stream.WriteAsync(incomplete);
+            }
+
+            var result = await wal.ReadForRecoveryAsync();
+
+            Assert.True(result.HasIncompleteTail);
+            Assert.Equal(validOffset, result.LastValidOffset);
+
+            await wal.RepairAsync(result.LastValidOffset);
+
+            // The file should now contain only the valid record.
+            Assert.Equal(validOffset, new FileInfo(filePath).Length);
+
+            var restored = await wal.ReadForRecoveryAsync();
+
+            Assert.False(restored.HasIncompleteTail);
+            Assert.Single(restored.Records);
+            Assert.Equal("user:1", restored.Records[0].Key);
+
+            // Verify that new records can be appended after repair.
+            await wal.AppendAsync(second);
+
+            var finalRecords = await wal.ReadAllAsync();
+
+            Assert.Equal(2, finalRecords.Count);
+            Assert.Equal("user:2", finalRecords[1].Key);
+        }
+        finally
+        {
+            if (File.Exists(filePath))
+                File.Delete(filePath);
+        }
+    }
 }
