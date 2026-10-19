@@ -40,7 +40,10 @@ public sealed class CrashRecoveryTests
     /// Starts a separate server process using a test-specific WAL file.
     /// Both output streams are drained to avoid blocking on full pipe buffers.
     /// </summary>
-    private static Process StartServer(string baseUrl, string walPath)
+    private static Process StartServer(
+    string baseUrl,
+    string walPath,
+    string? faultDirectory = null)
     {
         string serverDllPath = GetServerDllPath();
 
@@ -60,6 +63,12 @@ public sealed class CrashRecoveryTests
         // Reuse the same WAL path on restart, but isolate separate tests.
         startInfo.Environment["Storage__WalPath"] = walPath;
         startInfo.Environment["ASPNETCORE_ENVIRONMENT"] = "Testing";
+
+        // Enable cross-process fault injection only when requested.
+        if (faultDirectory is not null)
+        {
+            startInfo.Environment["Testing__FaultDirectory"] = faultDirectory;
+        }
 
         var process = Process.Start(startInfo)
             ?? throw new InvalidOperationException("Failed to start AegisDB.Server.");
@@ -334,6 +343,120 @@ public sealed class CrashRecoveryTests
                 await StopServerAsync(server);
 
             Directory.Delete(testDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Server_ShouldRecoverAfterCrashBeforeWalFlush()
+    {
+        string testDirectory = Path.Combine(
+            Path.GetTempPath(),
+            $"aegis-fault-{Guid.NewGuid():N}"
+        );
+
+        string faultDirectory = Path.Combine(testDirectory, "faults");
+        string walPath = Path.Combine(testDirectory, "test.wal");
+        string baseUrl = $"http://127.0.0.1:{GetAvailablePort()}";
+
+        Directory.CreateDirectory(faultDirectory);
+
+        string checkpoint = "wal.before_flush";
+
+        string enabledPath = Path.Combine(
+            faultDirectory, $"{checkpoint}.enabled");
+
+        string reachedPath = Path.Combine(
+            faultDirectory, $"{checkpoint}.reached");
+
+        // Activate the checkpoint before starting the server.
+        await File.WriteAllTextAsync(enabledPath, "");
+
+        Process? server = null;
+
+        try
+        {
+            server = StartServer(baseUrl, walPath, faultDirectory);
+
+            await WaitForServerReadyAsync(server, baseUrl);
+
+            using var client = new HttpClient
+            {
+                BaseAddress = new Uri(baseUrl),
+                Timeout = TimeSpan.FromSeconds(10)
+            };
+
+            // This request will pause before the WAL flush.
+            Task<HttpResponseMessage> putTask = client.PutAsync(
+                "/kv/user:1",
+                new ByteArrayContent(
+                    Encoding.UTF8.GetBytes("Alice")
+                )
+            );
+
+            // Wait until the server reaches the checkpoint.
+            using var timeout = new CancellationTokenSource(
+                TimeSpan.FromSeconds(10)
+            );
+
+            while (!File.Exists(reachedPath))
+            {
+                timeout.Token.ThrowIfCancellationRequested();
+                await Task.Delay(20, timeout.Token);
+            }
+
+            Assert.False(putTask.IsCompleted);
+
+            // Kill the process while the PUT is suspended.
+            await StopServerAsync(server);
+            server = null;
+
+            // Observe any HTTP failure to avoid an unobserved task.
+            try
+            {
+                using var response = await putTask;
+            }
+            catch (HttpRequestException)
+            {
+                // Expected if the connection is interrupted.
+            }
+            catch (TaskCanceledException)
+            {
+                // A disconnected request may be cancelled.
+            }
+
+            // Disable fault injection before restarting.
+            File.Delete(enabledPath);
+
+            server = StartServer(baseUrl, walPath);
+
+            await WaitForServerReadyAsync(server, baseUrl);
+
+            // The database must recover without corrupting the WAL.
+            using var healthResponse =
+                await client.GetAsync("/health");
+
+            Assert.Equal(
+                HttpStatusCode.OK,
+                healthResponse.StatusCode
+            );
+
+            // The interrupted write has an uncertain outcome.
+            // It may or may not be present after recovery.
+            using var getResponse =
+                await client.GetAsync("/kv/user:1");
+
+            Assert.True(
+                getResponse.StatusCode == HttpStatusCode.OK ||
+                getResponse.StatusCode == HttpStatusCode.NotFound
+            );
+        }
+        finally
+        {
+            if (server is not null)
+                await StopServerAsync(server);
+
+            if (Directory.Exists(testDirectory))
+                Directory.Delete(testDirectory, recursive: true);
         }
     }
 }

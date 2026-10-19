@@ -1,34 +1,57 @@
+
 using AegisDB.Core;
 using AegisDB.Core.Persistence;
 using AegisDB.Core.Storage;
+using AegisDB.Core.Diagnostics;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Register the in-memory key-value store as a singleton.
 builder.Services.AddSingleton<KeyValueStore>();
 
-// Allow each server instance to use an independent WAL file.
-// Integration tests override this value to isolate their data.
+// Configure the WAL path.
+// Integration tests can override it using Storage__WalPath.
 string walPath = builder.Configuration["Storage:WalPath"]
     ?? Path.Combine(AppContext.BaseDirectory, "aegis.wal");
 
-builder.Services.AddSingleton(new WriteAheadLog(walPath));
+// Fault injection is disabled during normal execution.
+// It can only be configured in the Testing environment.
+IFaultInjector faultInjector = new NoOpFaultInjector();
 
+if (builder.Environment.IsEnvironment("Testing"))
+{
+    string? faultDirectory =
+        builder.Configuration["Testing:FaultDirectory"];
+
+    if (!string.IsNullOrWhiteSpace(faultDirectory))
+    {
+        faultInjector = new FileFaultInjector(faultDirectory);
+    }
+}
+
+// Register the WAL with the configured fault injector.
+builder.Services.AddSingleton(
+    new WriteAheadLog(walPath, faultInjector)
+);
+
+// Register the database engine.
 builder.Services.AddSingleton<DatabaseEngine>();
 
-// Add services to the container.
-// Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
+// Register OpenAPI services.
 builder.Services.AddOpenApi();
 
 var app = builder.Build();
 
+// Restore the database state from the WAL before accepting requests.
+// Incomplete WAL tails are repaired during recovery.
 var recovery = new RecoveryManager(
     app.Services.GetRequiredService<WriteAheadLog>(),
     app.Services.GetRequiredService<KeyValueStore>()
 );
 
-// Restore persisted state before accepting HTTP requests.
 await recovery.RecoverAsync();
 
+// Store or update a value.
 app.MapPut("/kv/{key}", async (
     string key,
     HttpRequest request,
@@ -42,6 +65,7 @@ app.MapPut("/kv/{key}", async (
     return Results.NoContent();
 });
 
+// Retrieve a value by its key.
 app.MapGet("/kv/{key}", (string key, DatabaseEngine db) =>
 {
     var value = db.Get(key);
@@ -51,6 +75,7 @@ app.MapGet("/kv/{key}", (string key, DatabaseEngine db) =>
         : Results.File(value, "application/octet-stream");
 });
 
+// Delete an existing key.
 app.MapDelete("/kv/{key}", async (
     string key,
     DatabaseEngine db) =>
@@ -62,21 +87,20 @@ app.MapDelete("/kv/{key}", async (
         : Results.NotFound();
 });
 
-// Configure the HTTP request pipeline.
+// Expose OpenAPI only during development.
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
 }
 
-// Integration tests use HTTP on a local ephemeral port.
+// Integration tests use HTTP on an ephemeral local port.
 // HTTPS redirection remains enabled in other environments.
 if (!app.Environment.IsEnvironment("Testing"))
 {
     app.UseHttpsRedirection();
 }
 
-// Reports readiness after database recovery has completed.
+// Readiness is available only after WAL recovery completes.
 app.MapGet("/health", () => Results.Ok("Healthy"));
 
 app.Run();
-

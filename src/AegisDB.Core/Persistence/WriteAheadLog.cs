@@ -1,5 +1,7 @@
 namespace AegisDB.Core.Persistence;
 
+using AegisDB.Core.Diagnostics;
+
 /// <summary>
 /// Manages the append-only log used to persist database mutations.
 /// WAL entries will later be replayed to restore the database state.
@@ -8,10 +10,18 @@ public sealed class WriteAheadLog
 {
     private readonly string _filePath;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
+    private readonly IFaultInjector _faultInjector;
 
-    public WriteAheadLog(string filePath)
+    /// <summary>
+    /// Creates a WAL writer with an optional fault injector.
+    /// Fault injection is disabled by default.
+    /// </summary>
+    public WriteAheadLog(
+        string filePath,
+        IFaultInjector? faultInjector = null)
     {
         _filePath = filePath;
+        _faultInjector = faultInjector ?? new NoOpFaultInjector();
     }
 
     /// <summary>
@@ -39,8 +49,13 @@ public sealed class WriteAheadLog
 
             await stream.WriteAsync(data, cancellationToken);
 
-            // Request that buffered file data be flushed to storage.
-            // Flush every operation is expensive but ensures durability of each write.
+            // Allow tests to pause execution after writing the record,
+            // but before requesting that buffered data be flushed to storage.
+            await _faultInjector.CheckpointAsync(
+                "wal.before_flush",
+                cancellationToken
+            );
+
             stream.Flush(flushToDisk: true);
         }
         finally
