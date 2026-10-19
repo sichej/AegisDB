@@ -231,4 +231,47 @@ public class WriteAheadLogTests
                 File.Delete(filePath);
         }
     }
+
+    [Fact]
+    public async Task StreamRecordsAsync_ShouldReadRecordsInOrder()
+    {
+        string filePath = Path.Combine(
+            Path.GetTempPath(),
+            $"{Guid.NewGuid():N}.wal"
+        );
+
+        try
+        {
+            var wal = new WriteAheadLog(filePath);
+
+            await wal.AppendAsync(new WalRecord(
+                WalOperation.Put,
+                "key:1",
+                Encoding.UTF8.GetBytes("Alice")
+            ));
+
+            await wal.AppendAsync(new WalRecord(
+                WalOperation.Put,
+                "key:2",
+                Encoding.UTF8.GetBytes("Bob")
+            ));
+
+            var keys = new List<string>();
+
+            await foreach (var record in wal.StreamRecordsAsync())
+            {
+                keys.Add(record.Key);
+            }
+
+            Assert.Equal(
+                new[] { "key:1", "key:2" },
+                keys
+            );
+        }
+        finally
+        {
+            if (File.Exists(filePath))
+                File.Delete(filePath);
+        }
+    }
 }

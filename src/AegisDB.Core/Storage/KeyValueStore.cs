@@ -34,4 +34,21 @@ public class KeyValueStore
             return _data.Remove(key);
         }
     }
+
+    /// <summary>
+    /// Creates an independent point-in-time copy of all stored entries.
+    ///
+    /// The dictionary and its byte arrays are copied while holding
+    /// the lock, preventing concurrent mutations during the copy.
+    /// </summary>
+    public IReadOnlyDictionary<string, byte[]> CreateSnapshot()
+    {
+        lock (_lock)
+        {
+            return _data.ToDictionary(
+                entry => entry.Key,
+                entry => entry.Value.ToArray()
+            );
+        }
+    }
 }

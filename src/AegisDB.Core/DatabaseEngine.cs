@@ -81,4 +81,34 @@ public sealed class DatabaseEngine
             _writeLock.Release();
         }
     }
+
+    /// <summary>
+    /// Captures a consistent database snapshot together with
+    /// the WAL offset corresponding to the captured state.
+    ///
+    /// Mutations are blocked during the operation to prevent
+    /// inconsistencies between the snapshot data and WAL position.
+    /// </summary>
+    public async Task<Snapshot> CreateSnapshotAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await _writeLock.WaitAsync(cancellationToken);
+
+        try
+        {
+            // Prevent PUT and DELETE operations from changing
+            // the WAL or in-memory state during snapshot creation.
+            var data = _store.CreateSnapshot();
+
+            // The WAL offset corresponds to the state captured above
+            // because both operations are protected by the same lock.
+            long walOffset = await _wal.GetLengthAsync(cancellationToken);
+
+            return new Snapshot(walOffset, data);
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
 }

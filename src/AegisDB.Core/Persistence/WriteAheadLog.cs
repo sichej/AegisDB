@@ -1,5 +1,7 @@
 namespace AegisDB.Core.Persistence;
 
+using System.Runtime.CompilerServices;
+
 using AegisDB.Core.Diagnostics;
 
 /// <summary>
@@ -270,6 +272,96 @@ public sealed class WriteAheadLog
 
             // Request that the truncation is persisted to storage.
             stream.Flush(flushToDisk: true);
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Streams WAL records sequentially without loading the entire
+    /// log into memory.
+    ///
+    /// Each record is validated before being returned to the caller.
+    /// Incomplete or corrupted records cause recovery to fail.
+    ///
+    /// This method must not run concurrently with WAL writes.
+    /// </summary>
+    public async IAsyncEnumerable<WalRecord> StreamRecordsAsync(
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        if (!File.Exists(_filePath))
+            yield break;
+
+        await using var stream = new FileStream(
+            _filePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            bufferSize: 4096,
+            useAsync: true
+        );
+
+        const int minRecordLength = 13;
+        const int maxRecordLength = 16 * 1024 * 1024;
+
+        while (stream.Position < stream.Length)
+        {
+            long recordStart = stream.Position;
+
+            byte[] lengthBuffer = new byte[sizeof(int)];
+
+            // ReadExactlyAsync throws if the length prefix is incomplete.
+            await stream.ReadExactlyAsync(
+                lengthBuffer,
+                cancellationToken
+            );
+
+            int recordLength = BitConverter.ToInt32(lengthBuffer);
+
+            if (recordLength < minRecordLength ||
+                recordLength > maxRecordLength)
+            {
+                throw new InvalidDataException(
+                    $"Invalid WAL record length at offset {recordStart}."
+                );
+            }
+
+            byte[] recordBytes = new byte[sizeof(int) + recordLength];
+
+            lengthBuffer.CopyTo(recordBytes, 0);
+
+            // Read a single complete record into memory.
+            await stream.ReadExactlyAsync(
+                recordBytes.AsMemory(sizeof(int), recordLength),
+                cancellationToken
+            );
+
+            // Deserialize validates the record structure and checksum.
+            yield return WalSerializer.Deserialize(recordBytes);
+        }
+    }
+
+    /// <summary>
+    /// Returns the current WAL file length in bytes.
+    ///
+    /// The returned offset can be used to identify the last
+    /// persisted operation included in a database snapshot.
+    ///
+    /// Callers must coordinate this operation with database mutations
+    /// to ensure the offset matches the captured state.
+    /// </summary>
+    public async Task<long> GetLengthAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await _writeLock.WaitAsync(cancellationToken);
+
+        try
+        {
+            return File.Exists(_filePath)
+                ? new FileInfo(_filePath).Length
+                : 0;
         }
         finally
         {

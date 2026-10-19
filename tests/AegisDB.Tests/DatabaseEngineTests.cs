@@ -54,4 +54,51 @@ public class DatabaseEngineTests
                 File.Delete(filePath);
         }
     }
+
+    [Fact]
+    public async Task CreateSnapshotAsync_ShouldCaptureDataAndWalOffset()
+    {
+        string filePath = Path.Combine(
+            Path.GetTempPath(),
+            $"{Guid.NewGuid():N}.wal"
+        );
+
+        try
+        {
+            var store = new KeyValueStore();
+            var wal = new WriteAheadLog(filePath);
+            var database = new DatabaseEngine(store, wal);
+
+            await database.PutAsync(
+                "user:1",
+                Encoding.UTF8.GetBytes("Alice")
+            );
+
+            Snapshot snapshot = await database.CreateSnapshotAsync();
+
+            long expectedOffset = new FileInfo(filePath).Length;
+
+            Assert.Equal(expectedOffset, snapshot.WalOffset);
+            Assert.Equal(
+                "Alice",
+                Encoding.UTF8.GetString(snapshot.Data["user:1"])
+            );
+
+            // Subsequent mutations must not alter the snapshot.
+            await database.PutAsync(
+                "user:1",
+                Encoding.UTF8.GetBytes("Bob")
+            );
+
+            Assert.Equal(
+                "Alice",
+                Encoding.UTF8.GetString(snapshot.Data["user:1"])
+            );
+        }
+        finally
+        {
+            if (File.Exists(filePath))
+                File.Delete(filePath);
+        }
+    }
 }

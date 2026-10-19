@@ -63,4 +63,30 @@ public class KeyValueStoreTests
         Assert.NotNull(stored);
         Assert.Equal(1, stored[0]);
     }
+
+    [Fact]
+    public void CreateSnapshot_ShouldReturnIndependentCopy()
+    {
+        var store = new KeyValueStore();
+
+        store.Put("user:1", new byte[] { 1, 2, 3 });
+
+        var snapshot = store.CreateSnapshot();
+
+        // Modify the original database after taking the snapshot.
+        store.Put("user:1", new byte[] { 4, 5, 6 });
+        store.Put("user:2", new byte[] { 7, 8, 9 });
+
+        // The snapshot must preserve the original state.
+        Assert.Single(snapshot);
+        Assert.Equal(new byte[] { 1, 2, 3 }, snapshot["user:1"]);
+
+        // Modifying the snapshot must not affect the database.
+        snapshot["user:1"][0] = 99;
+
+        Assert.Equal(
+            new byte[] { 4, 5, 6 },
+            store.Get("user:1")
+        );
+    }
 }
