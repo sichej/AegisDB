@@ -89,4 +89,41 @@ public class KeyValueStoreTests
             store.Get("user:1")
         );
     }
+
+    [Fact]
+    public void RestoreSnapshot_ShouldReplaceExistingState()
+    {
+        var store = new KeyValueStore();
+
+        store.Put("old:key", new byte[] { 99 });
+
+        var snapshot = new Dictionary<string, byte[]>
+        {
+            ["user:1"] = new byte[] { 1, 2, 3 },
+            ["user:2"] = new byte[] { 4, 5, 6 }
+        };
+
+        store.RestoreSnapshot(snapshot);
+
+        // The previous state must be completely replaced.
+        Assert.Null(store.Get("old:key"));
+
+        Assert.Equal(
+            new byte[] { 1, 2, 3 },
+            store.Get("user:1")
+        );
+
+        Assert.Equal(
+            new byte[] { 4, 5, 6 },
+            store.Get("user:2")
+        );
+
+        // Verify that restored values do not share external buffers.
+        snapshot["user:1"][0] = 99;
+
+        Assert.Equal(
+            new byte[] { 1, 2, 3 },
+            store.Get("user:1")
+        );
+    }
 }

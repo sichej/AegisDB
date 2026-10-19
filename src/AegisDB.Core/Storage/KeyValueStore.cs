@@ -51,4 +51,32 @@ public class KeyValueStore
             );
         }
     }
+
+    /// <summary>
+    /// Replaces the current in-memory state with the contents
+    /// of a previously validated database snapshot.
+    ///
+    /// All entries are copied to prevent external code from
+    /// modifying the restored database state.
+    /// </summary>
+    public void RestoreSnapshot(IReadOnlyDictionary<string, byte[]> data)
+    {
+        ArgumentNullException.ThrowIfNull(data);
+
+        // Prepare the new state before modifying the current store.
+        var restored = data.ToDictionary(
+            entry => entry.Key,
+            entry => entry.Value.ToArray()
+        );
+
+        lock (_lock)
+        {
+            _data.Clear();
+
+            foreach (var (key, value) in restored)
+            {
+                _data.Add(key, value);
+            }
+        }
+    }
 }
