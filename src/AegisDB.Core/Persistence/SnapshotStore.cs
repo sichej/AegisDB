@@ -17,87 +17,115 @@ namespace AegisDB.Core.Persistence;
 public sealed class SnapshotStore
 {
     private readonly string _filePath;
+    private readonly SemaphoreSlim _saveLock = new(1, 1);
 
     public SnapshotStore(string filePath)
     {
         _filePath = filePath;
     }
 
+
     /// <summary>
-    /// Writes a snapshot to a temporary file and atomically
-    /// renames it to the destination when supported by the filesystem.
+    /// Persists a database snapshot using a temporary file.
     ///
-    /// This initial version does not yet implement checksums
-    /// or crash-durability guarantees for the rename.
+    /// Concurrent saves are serialized to prevent simultaneous
+    /// modifications of the snapshot file.
+    ///
+    /// The temporary file is flushed before replacing the existing
+    /// snapshot, reducing the risk of exposing incomplete data.
     /// </summary>
     public async Task SaveAsync(
         Snapshot snapshot,
         CancellationToken cancellationToken = default)
     {
-        string tempPath = _filePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        // Avoid concurrent writes in the same ShanshotStore instances
+        await _saveLock.WaitAsync(cancellationToken);
 
         try
         {
-            await using (var stream = new FileStream(
-                tempPath,
-                FileMode.CreateNew,
-                FileAccess.ReadWrite,
-                FileShare.None,
-                bufferSize: 4096,
-                useAsync: true))
+            // Never replace a newer snapshot with an older one.
+            // The check and subsequent save are protected by _saveLock.
+            Snapshot? existing = await LoadAsync(cancellationToken);
+
+            if (existing is not null && snapshot.WalOffset <= existing.WalOffset)
             {
-                using var writer = new BinaryWriter(
-                    stream,
-                    Encoding.UTF8,
-                    leaveOpen: true
-                );
+                return;
+            }
+            
+            string tempPath = _filePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
 
-                // Format version allows future changes to the binary layout.
-                writer.Write(2);
-
-                // WAL position represented by this snapshot.
-                writer.Write(snapshot.WalOffset);
-
-                // Number of key-value entries.
-                writer.Write(snapshot.Data.Count);
-
-                foreach (var (key, value) in snapshot.Data)
+            try
+            {
+                await using (var stream = new FileStream(
+                    tempPath,
+                    FileMode.CreateNew,
+                    FileAccess.ReadWrite,
+                    FileShare.None,
+                    bufferSize: 4096,
+                    useAsync: true))
                 {
-                    byte[] keyBytes = Encoding.UTF8.GetBytes(key);
+                    using var writer = new BinaryWriter(
+                        stream,
+                        Encoding.UTF8,
+                        leaveOpen: true
+                    );
 
-                    writer.Write(keyBytes.Length);
-                    writer.Write(value.Length);
+                    // Snapshot format version 2 includes CRC32.
+                    writer.Write(2);
 
-                    writer.Write(keyBytes);
-                    writer.Write(value);
+                    // WAL offset represented by this snapshot.
+                    writer.Write(snapshot.WalOffset);
+
+                    writer.Write(snapshot.Data.Count);
+
+                    foreach (var (key, value) in snapshot.Data)
+                    {
+                        byte[] keyBytes = Encoding.UTF8.GetBytes(key);
+
+                        writer.Write(keyBytes.Length);
+                        writer.Write(value.Length);
+
+                        writer.Write(keyBytes);
+                        writer.Write(value);
+                    }
+
+                    writer.Flush();
+
+                    // Calculate CRC32 over the complete snapshot payload,
+                    // excluding the checksum field itself.
+                    stream.Position = 0;
+
+                    byte[] snapshotBytes =
+                        new byte[checked((int)stream.Length)];
+
+                    stream.ReadExactly(snapshotBytes);
+
+                    uint checksum = Crc32.HashToUInt32(snapshotBytes);
+
+                    // Append the checksum after the snapshot payload.
+                    stream.Position = stream.Length;
+
+                    writer.Write(checksum);
+                    writer.Flush();
+
+                    // Request that all snapshot data is flushed to storage.
+                    stream.Flush(flushToDisk: true);
                 }
 
-                writer.Flush();
-
-                // Compute the checksum over the complete snapshot payload,
-                // excluding the checksum field itself.
-                stream.Position = 0;
-
-                byte[] snapshotBytes = new byte[checked((int)stream.Length)];
-
-                stream.ReadExactly(snapshotBytes);
-
-                uint checksum = Crc32.HashToUInt32(snapshotBytes);
-
-                // Append the checksum to the end of the snapshot.
-                stream.Position = stream.Length;
-                writer.Write(checksum);
-
-                writer.Flush();
-                stream.Flush(flushToDisk: true);
+                // Replace the previous snapshot only after the
+                // temporary file has been completely written.
+                File.Move(tempPath, _filePath, overwrite: true);
             }
-
-            File.Move(tempPath, _filePath, overwrite: true);
+            finally
+            {
+                // Remove temporary files left by failed save operations.
+                if (File.Exists(tempPath))
+                    File.Delete(tempPath);
+            }
         }
         finally
         {
-            if (File.Exists(tempPath))
-                File.Delete(tempPath);
+            _saveLock.Release();
         }
     }
 

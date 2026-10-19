@@ -91,4 +91,52 @@ public sealed class SnapshotStoreTests
                 File.Delete(filePath);
         }
     }
+
+    [Fact]
+    public async Task SaveAsync_ShouldNotOverwriteNewerSnapshot()
+    {
+        string filePath = Path.Combine(
+            Path.GetTempPath(),
+            $"{Guid.NewGuid():N}.snapshot"
+        );
+
+        try
+        {
+            var store = new SnapshotStore(filePath);
+
+            var newer = new Snapshot(
+                200,
+                new Dictionary<string, byte[]>
+                {
+                    ["user:1"] = Encoding.UTF8.GetBytes("Bob")
+                }
+            );
+
+            var older = new Snapshot(
+                100,
+                new Dictionary<string, byte[]>
+                {
+                    ["user:1"] = Encoding.UTF8.GetBytes("Alice")
+                }
+            );
+
+            await store.SaveAsync(newer);
+            await store.SaveAsync(older);
+
+            Snapshot? restored = await store.LoadAsync();
+
+            Assert.NotNull(restored);
+            Assert.Equal(200, restored.WalOffset);
+
+            Assert.Equal(
+                "Bob",
+                Encoding.UTF8.GetString(restored.Data["user:1"])
+            );
+        }
+        finally
+        {
+            if (File.Exists(filePath))
+                File.Delete(filePath);
+        }
+    }
 }
