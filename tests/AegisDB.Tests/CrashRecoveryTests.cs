@@ -62,6 +62,7 @@ public sealed class CrashRecoveryTests
 
         // Reuse the same WAL path on restart, but isolate separate tests.
         startInfo.Environment["Storage__WalPath"] = walPath;
+        startInfo.Environment["Storage__SnapshotPath"] = Path.Combine(Path.GetDirectoryName(walPath)!, "test.snapshot");
         startInfo.Environment["ASPNETCORE_ENVIRONMENT"] = "Testing";
 
         // Enable cross-process fault injection only when requested.

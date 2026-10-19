@@ -34,6 +34,12 @@ builder.Services.AddSingleton(
     new WriteAheadLog(walPath, faultInjector)
 );
 
+// Store snapshots alongside the WAL using an independent file.
+string snapshotPath = builder.Configuration["Storage:SnapshotPath"]
+    ?? Path.Combine(AppContext.BaseDirectory, "aegis.snapshot");
+
+builder.Services.AddSingleton(new SnapshotStore(snapshotPath));
+
 // Register the database engine.
 builder.Services.AddSingleton<DatabaseEngine>();
 
@@ -42,11 +48,11 @@ builder.Services.AddOpenApi();
 
 var app = builder.Build();
 
-// Restore the database state from the WAL before accepting requests.
-// Incomplete WAL tails are repaired during recovery.
+// Restore the latest validated snapshot and replay subsequent WAL records.
 var recovery = new RecoveryManager(
     app.Services.GetRequiredService<WriteAheadLog>(),
-    app.Services.GetRequiredService<KeyValueStore>()
+    app.Services.GetRequiredService<KeyValueStore>(),
+    app.Services.GetRequiredService<SnapshotStore>()
 );
 
 await recovery.RecoverAsync();
@@ -99,6 +105,24 @@ if (!app.Environment.IsEnvironment("Testing"))
 {
     app.UseHttpsRedirection();
 }
+
+// Creates a persistent snapshot of the current database state.
+// Intended for local development and testing.
+app.MapPost("/admin/snapshot", async (
+    DatabaseEngine db,
+    SnapshotStore snapshotStore,
+    CancellationToken cancellationToken) =>
+{
+    Snapshot snapshot = await db.CreateSnapshotAsync(cancellationToken);
+
+    await snapshotStore.SaveAsync(snapshot, cancellationToken);
+
+    return Results.Ok(new
+    {
+        walOffset = snapshot.WalOffset,
+        entries = snapshot.Data.Count
+    });
+});
 
 // Readiness is available only after WAL recovery completes.
 app.MapGet("/health", () => Results.Ok("Healthy"));
