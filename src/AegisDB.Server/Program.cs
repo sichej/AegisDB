@@ -6,11 +6,12 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddSingleton<KeyValueStore>();
 
-builder.Services.AddSingleton(
-    new WriteAheadLog(
-        Path.Combine(AppContext.BaseDirectory, "aegis.wal")
-    )
-);
+// Allow each server instance to use an independent WAL file.
+// Integration tests override this value to isolate their data.
+string walPath = builder.Configuration["Storage:WalPath"]
+    ?? Path.Combine(AppContext.BaseDirectory, "aegis.wal");
+
+builder.Services.AddSingleton(new WriteAheadLog(walPath));
 
 builder.Services.AddSingleton<DatabaseEngine>();
 
@@ -67,7 +68,12 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 }
 
-app.UseHttpsRedirection();
+// Integration tests use HTTP on a local ephemeral port.
+// HTTPS redirection remains enabled in other environments.
+if (!app.Environment.IsEnvironment("Testing"))
+{
+    app.UseHttpsRedirection();
+}
 
 // Reports readiness after database recovery has completed.
 app.MapGet("/health", () => Results.Ok("Healthy"));

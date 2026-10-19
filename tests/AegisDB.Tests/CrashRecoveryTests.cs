@@ -1,4 +1,7 @@
 using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
 
 namespace AegisDB.Tests;
 
@@ -8,6 +11,25 @@ namespace AegisDB.Tests;
 /// </summary>
 public sealed class CrashRecoveryTests
 {
+
+    /// <summary>
+    /// Finds an available local TCP port for the test server.
+    ///
+    /// The port is released immediately, so another process could
+    /// theoretically claim it before the server starts.
+    /// </summary>
+    private static int GetAvailablePort()
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+
+        listener.Start();
+
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+
+        listener.Stop();
+
+        return port;
+    }
     [Fact]
     public async Task Server_ShouldStartAsSeparateProcess()
     {
@@ -24,6 +46,20 @@ public sealed class CrashRecoveryTests
             $"Server project not found: {serverProjectPath}"
         );
 
+        // Use a unique WAL path to avoid interfering with other tests.
+        string testDirectory = Path.Combine(
+            Path.GetTempPath(),
+            $"aegis-test-{Guid.NewGuid():N}"
+        );
+
+        Directory.CreateDirectory(testDirectory);
+
+        string walPath = Path.Combine(testDirectory, "test.wal");
+
+        int port = GetAvailablePort();
+
+        string baseUrl = $"http://127.0.0.1:{port}";
+
         var startInfo = new ProcessStartInfo
         {
             FileName = "dotnet",
@@ -38,7 +74,9 @@ public sealed class CrashRecoveryTests
         startInfo.ArgumentList.Add(serverProjectPath);
         startInfo.ArgumentList.Add("--");
         startInfo.ArgumentList.Add("--urls");
-        startInfo.ArgumentList.Add("http://127.0.0.1:5100");
+        startInfo.ArgumentList.Add(baseUrl);
+        // ASP.NET Core maps double underscores to configuration sections.
+        startInfo.Environment["Storage__WalPath"] = walPath;
 
         using var process = new Process
         {
@@ -49,10 +87,7 @@ public sealed class CrashRecoveryTests
         {
             Assert.True(process.Start());
 
-            await WaitForServerReadyAsync(
-                process,
-                "http://127.0.0.1:5100"
-            );
+            await WaitForServerReadyAsync(process, baseUrl);
 
             Assert.False(process.HasExited);
         }
@@ -65,6 +100,11 @@ public sealed class CrashRecoveryTests
             }
 
             await process.WaitForExitAsync();
+            // Clean up only after the server process has terminated.
+            if (Directory.Exists(testDirectory))
+            {
+                Directory.Delete(testDirectory, recursive: true);
+            }
         }
     }
 
@@ -119,5 +159,163 @@ public sealed class CrashRecoveryTests
 
             await Task.Delay(200, timeout.Token);
         }
+    }
+
+    [Fact]
+    public async Task Server_ShouldRecoverDataAfterProcessCrash()
+    {
+        // Locate the compiled server assembly.
+        // The test and server must use the same build configuration.
+        string configuration =
+#if DEBUG
+                    "Debug";
+#else
+            "Release";
+#endif
+
+        string serverDllPath = Path.GetFullPath(
+            Path.Combine(
+                AppContext.BaseDirectory,
+                "../../../../../src/AegisDB.Server/bin",
+                configuration,
+                "net10.0",
+                "AegisDB.Server.dll"
+            )
+        );
+
+        Assert.True(
+            File.Exists(serverDllPath),
+            $"Server assembly not found: {serverDllPath}"
+        );
+
+        string testDirectory = Path.Combine(
+            Path.GetTempPath(),
+            $"aegis-crash-{Guid.NewGuid():N}"
+        );
+
+        Directory.CreateDirectory(testDirectory);
+
+        string walPath = Path.Combine(testDirectory, "test.wal");
+        string baseUrl = $"http://127.0.0.1:{GetAvailablePort()}";
+
+        Process StartServer()
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = "dotnet",
+                WorkingDirectory = Path.GetDirectoryName(serverDllPath)!,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+
+            // Execute the compiled server directly.
+            startInfo.ArgumentList.Add(serverDllPath);
+            startInfo.ArgumentList.Add("--urls");
+            startInfo.ArgumentList.Add(baseUrl);
+
+            // Preserve the same WAL across process restarts.
+            startInfo.Environment["Storage__WalPath"] = walPath;
+            startInfo.Environment["ASPNETCORE_ENVIRONMENT"] = "Testing";
+
+            var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException(
+                "Failed to start AegisDB.Server."
+            );
+
+            // Start consuming both redirected output streams.
+            CaptureProcessOutput(process);
+
+            return process;
+        }
+
+        static async Task StopServerAsync(Process process)
+        {
+            try
+            {
+                if (!process.HasExited)
+                    process.Kill(entireProcessTree: true);
+
+                await process.WaitForExitAsync();
+            }
+            finally
+            {
+                process.Dispose();
+            }
+        }
+
+        Process? server = null;
+
+        try
+        {
+            using var client = new HttpClient
+            {
+                BaseAddress = new Uri(baseUrl)
+            };
+
+            // Start the first server instance.
+            server = StartServer();
+
+            await WaitForServerReadyAsync(server, baseUrl);
+
+            using (var response = await client.PutAsync(
+                "/kv/user:1",
+                new ByteArrayContent(
+                    Encoding.UTF8.GetBytes("Alice")
+                )))
+            {
+                Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+            }
+
+            // Simulate an unexpected process termination.
+            await StopServerAsync(server);
+            server = null;
+
+            // Restart with the same persistent WAL.
+            server = StartServer();
+
+            await WaitForServerReadyAsync(server, baseUrl);
+
+            // Verify the confirmed write survived the crash.
+            using var getResponse = await client.GetAsync("/kv/user:1");
+
+            Assert.Equal(HttpStatusCode.OK, getResponse.StatusCode);
+
+            string value = await getResponse.Content.ReadAsStringAsync();
+
+            Assert.Equal("Alice", value);
+        }
+        finally
+        {
+            if (server is not null)
+                await StopServerAsync(server);
+
+            if (Directory.Exists(testDirectory))
+                Directory.Delete(testDirectory, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// Continuously drains the server's stdout and stderr streams.
+    ///
+    /// This prevents redirected output buffers from filling up
+    /// and blocking the server process.
+    /// </summary>
+    private static void CaptureProcessOutput(Process process)
+    {
+        process.OutputDataReceived += (_, args) =>
+        {
+            if (args.Data is not null)
+                Console.WriteLine($"[SERVER] {args.Data}");
+        };
+
+        process.ErrorDataReceived += (_, args) =>
+        {
+            if (args.Data is not null)
+                Console.Error.WriteLine($"[SERVER ERROR] {args.Data}");
+        };
+
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
     }
 }
