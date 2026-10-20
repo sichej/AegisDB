@@ -501,4 +501,94 @@ public sealed class RaftNode
     }
 
 
+    /// <summary>
+    /// Processes a heartbeat-only AppendEntries RPC.
+    ///
+    /// Validates the leader's term and local log consistency.
+    /// A valid heartbeat causes the node to become a Follower.
+    ///
+    /// Log replication and commit index updates are not
+    /// implemented yet.
+    /// </summary>
+    public async Task<AppendEntriesResponse> HandleAppendEntriesAsync(
+        AppendEntriesRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        if (_stateStore is null)
+        {
+            throw new InvalidOperationException(
+                "Persistent state store is not configured.");
+        }
+
+        if (request.Term < 0 ||
+            request.PrevLogIndex < 0 ||
+            request.PrevLogTerm < 0 ||
+            request.LeaderCommit < 0 ||
+            string.IsNullOrWhiteSpace(request.LeaderId) ||
+            request.Entries is null ||
+            (request.PrevLogIndex == 0 && request.PrevLogTerm != 0))
+        {
+            throw new ArgumentException(
+                "Invalid AppendEntries request.",
+                nameof(request));
+        }
+
+        if (request.Entries.Count != 0)
+        {
+            throw new NotSupportedException(
+                "Log replication is not implemented yet.");
+        }
+
+        await _stateLock.WaitAsync(cancellationToken);
+
+        try
+        {
+            // Reject messages from nodes outside the voting configuration.
+            if (!Cluster.Contains(request.LeaderId))
+            {
+                return new AppendEntriesResponse(CurrentTerm, false);
+            }
+
+            // An outdated leader cannot modify this node.
+            if (request.Term < CurrentTerm)
+            {
+                return new AppendEntriesResponse(CurrentTerm, false);
+            }
+
+            if (request.Term > CurrentTerm)
+            {
+                // A newer term must be persisted before it is accepted.
+                await _stateStore.SaveAsync(
+                    new RaftPersistentState(
+                        request.Term,
+                        VotedFor: null),
+                    cancellationToken);
+
+                CurrentTerm = request.Term;
+                VotedFor = null;
+            }
+
+            // An accepted leader message establishes the Follower role.
+            State = RaftNodeState.Follower;
+            _votesReceived.Clear();
+
+            // Verify that the follower contains the preceding log entry.
+            if (!Log.Matches(
+                request.PrevLogIndex,
+                request.PrevLogTerm))
+            {
+                return new AppendEntriesResponse(CurrentTerm, false);
+            }
+
+            return new AppendEntriesResponse(CurrentTerm, true);
+        }
+        finally
+        {
+            _stateLock.Release();
+        }
+    }
+
+
 }
