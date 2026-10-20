@@ -1,5 +1,6 @@
 
 using AegisDB.Core.Consensus.Messages;
+using AegisDB.Core.Consensus.Persistence;
 
 namespace AegisDB.Core.Consensus;
 
@@ -52,11 +53,34 @@ public sealed class RaftNode
     /// </summary>
     public int VotesReceived => _votesReceived.Count;
 
-    public RaftNode(string nodeId)
+    public RaftClusterConfiguration Cluster { get; }
+
+    private readonly RaftStateStore? _stateStore;
+
+    /// <summary>
+    /// Serializes Raft state transitions that involve persistent storage.
+    /// </summary>
+    private readonly SemaphoreSlim _stateLock = new(1, 1);
+
+    public RaftNode(
+        string nodeId,
+        RaftClusterConfiguration cluster,
+        RaftStateStore? stateStore = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(nodeId);
+        ArgumentNullException.ThrowIfNull(cluster);
+
+        if (!cluster.Contains(nodeId))
+        {
+            throw new ArgumentException(
+                "The local node must be a cluster member.",
+                nameof(nodeId));
+        }
 
         NodeId = nodeId;
+        Cluster = cluster;
+        _stateStore = stateStore;
+
         CurrentTerm = 0;
         VotedFor = null;
         State = RaftNodeState.Follower;
@@ -73,6 +97,8 @@ public sealed class RaftNode
     /// </summary>
     public void StartElection()
     {
+        EnsureInMemoryMode();
+
         if (State == RaftNodeState.Leader)
         {
             throw new InvalidOperationException(
@@ -100,6 +126,8 @@ public sealed class RaftNode
     /// </summary>
     public void BecomeFollower(long term)
     {
+        EnsureInMemoryMode();
+
         if (term < CurrentTerm)
         {
             throw new ArgumentOutOfRangeException(
@@ -150,6 +178,7 @@ public sealed class RaftNode
     /// </summary>
     public RequestVoteResponse HandleRequestVote(RequestVoteRequest request)
     {
+        EnsureInMemoryMode();
         ArgumentNullException.ThrowIfNull(request);
 
         // Reject candidates from older terms.
@@ -186,6 +215,8 @@ public sealed class RaftNode
     /// </summary>
     public void BecomeLeader()
     {
+        EnsureInMemoryMode();
+
         if (State != RaftNodeState.Candidate)
         {
             throw new InvalidOperationException(
@@ -196,27 +227,26 @@ public sealed class RaftNode
     }
 
 
+
     /// <summary>
-    /// Records a vote granted by another cluster node.
+    /// Processes a vote response from a configured cluster member.
     ///
-    /// Duplicate votes are ignored. A candidate becomes Leader
-    /// after obtaining a majority in its current term.
-    ///
-    /// The caller must associate the response with the current
-    /// election and verify the identity of the responding peer.
+    /// Duplicate votes, unknown voters and responses from previous
+    /// terms are not counted.
     /// </summary>
     public bool ReceiveVote(
         string voterId,
         long term,
-        bool voteGranted,
-        int clusterSize)
+        bool voteGranted)
     {
+        EnsureInMemoryMode();
         ArgumentException.ThrowIfNullOrWhiteSpace(voterId);
 
-        if (clusterSize < 1)
-            throw new ArgumentOutOfRangeException(nameof(clusterSize));
+        // Never count votes from nodes outside this cluster.
+        if (!Cluster.Contains(voterId) || voterId == NodeId)
+            return false;
 
-        // A response from a newer term invalidates our candidacy.
+        // A higher term invalidates the current candidacy.
         if (term > CurrentTerm)
         {
             BecomeFollower(term);
@@ -230,12 +260,10 @@ public sealed class RaftNode
             return false;
         }
 
-        // A HashSet prevents counting the same voter twice.
+        // Each voter contributes at most one vote.
         _votesReceived.Add(voterId);
 
-        int quorum = (clusterSize / 2) + 1;
-
-        if (_votesReceived.Count >= quorum)
+        if (_votesReceived.Count >= Cluster.QuorumSize)
         {
             BecomeLeader();
             return true;
@@ -243,6 +271,148 @@ public sealed class RaftNode
 
         return false;
     }
+
+
+    /// <summary>
+    /// Creates a Raft node by restoring its persistent election state.
+    ///
+    /// A restarted node always begins as a Follower, while its
+    /// current term and previous vote are recovered from disk.
+    /// </summary>
+    public static async Task<RaftNode> CreateAsync(
+        string nodeId,
+        RaftClusterConfiguration cluster,
+        RaftStateStore stateStore,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(stateStore);
+
+        var persistedState = await stateStore.LoadAsync(cancellationToken);
+
+        var node = new RaftNode(nodeId, cluster, stateStore)
+        {
+            CurrentTerm = persistedState.CurrentTerm,
+            VotedFor = persistedState.VotedFor
+        };
+
+        return node;
+    }
+
+
+    /// <summary>
+    /// Starts a new election and durably records the new term
+    /// and self-vote before changing the in-memory node state.
+    ///
+    /// Callers must serialize concurrent Raft operations.
+    /// </summary>
+    public async Task StartElectionAsync(
+        CancellationToken cancellationToken = default)
+    {
+        if (_stateStore is null)
+        {
+            throw new InvalidOperationException(
+                "Persistent state store is not configured.");
+        }
+
+        await _stateLock.WaitAsync(cancellationToken);
+
+        try
+        {
+            if (State == RaftNodeState.Leader)
+            {
+                throw new InvalidOperationException(
+                    "A leader cannot start a new election.");
+            }
+
+            long newTerm = checked(CurrentTerm + 1);
+
+            var persistentState = new RaftPersistentState(
+                CurrentTerm: newTerm,
+                VotedFor: NodeId
+            );
+
+            // Persist before publishing the new election state.
+            await _stateStore.SaveAsync(
+                persistentState,
+                cancellationToken);
+
+            CurrentTerm = newTerm;
+            VotedFor = NodeId;
+            State = RaftNodeState.Candidate;
+
+            _votesReceived.Clear();
+            _votesReceived.Add(NodeId);
+        }
+        finally
+        {
+            _stateLock.Release();
+        }
+    }
+
+
+    private void EnsureInMemoryMode()
+    {
+        if (_stateStore is not null)
+        {
+            throw new InvalidOperationException(
+                "This operation is not yet supported for persistent Raft nodes.");
+        }
+    }
+
+
+    /// <summary>
+    /// Transitions a persistent Raft node to Follower.
+    ///
+    /// When a newer term is observed, the node durably records
+    /// the new term and clears its previous vote before updating
+    /// its in-memory state.
+    /// </summary>
+    public async Task BecomeFollowerAsync(
+        long term,
+        CancellationToken cancellationToken = default)
+    {
+        if (_stateStore is null)
+        {
+            throw new InvalidOperationException(
+                "Persistent state store is not configured.");
+        }
+
+        await _stateLock.WaitAsync(cancellationToken);
+
+        try
+        {
+            if (term < CurrentTerm)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(term),
+                    "Cannot transition to an older Raft term.");
+            }
+
+            if (term > CurrentTerm)
+            {
+                var persistentState = new RaftPersistentState(
+                    CurrentTerm: term,
+                    VotedFor: null
+                );
+
+                // A newer term must survive a node restart.
+                await _stateStore.SaveAsync(
+                    persistentState,
+                    cancellationToken);
+
+                CurrentTerm = term;
+                VotedFor = null;
+            }
+
+            State = RaftNodeState.Follower;
+            _votesReceived.Clear();
+        }
+        finally
+        {
+            _stateLock.Release();
+        }
+    }
+
 
 
 }

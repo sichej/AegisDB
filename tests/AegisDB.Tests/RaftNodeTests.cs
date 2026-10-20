@@ -1,6 +1,7 @@
 
 using AegisDB.Core.Consensus;
 using AegisDB.Core.Consensus.Messages;
+using AegisDB.Core.Consensus.Persistence;
 
 namespace AegisDB.Tests;
 
@@ -9,10 +10,20 @@ namespace AegisDB.Tests;
 /// </summary>
 public sealed class RaftNodeTests
 {
+
+    private static RaftNode CreateNode()
+    {
+        var cluster = new RaftClusterConfiguration(
+            ["node-1", "node-2", "node-3", "node-4", "node-5"]
+        );
+
+        return new RaftNode("node-1", cluster);
+    }
+
     [Fact]
     public void StartElection_ShouldBecomeCandidateAndVoteForSelf()
     {
-        var node = new RaftNode("node-1");
+        var node = CreateNode();
 
         node.StartElection();
 
@@ -24,7 +35,7 @@ public sealed class RaftNodeTests
     [Fact]
     public void StartElection_WhenAlreadyCandidate_ShouldStartNewTerm()
     {
-        var node = new RaftNode("node-1");
+        var node = CreateNode();
 
         node.StartElection();
         node.StartElection();
@@ -38,7 +49,7 @@ public sealed class RaftNodeTests
     [Fact]
     public void BecomeFollower_WithHigherTerm_ShouldResetVote()
     {
-        var node = new RaftNode("node-1");
+        var node = CreateNode();
 
         node.StartElection();
 
@@ -52,7 +63,7 @@ public sealed class RaftNodeTests
     [Fact]
     public void BecomeFollower_WithSameTerm_ShouldPreserveVote()
     {
-        var node = new RaftNode("node-1");
+        var node = CreateNode();
 
         node.StartElection();
 
@@ -66,7 +77,7 @@ public sealed class RaftNodeTests
     [Fact]
     public void BecomeFollower_WithOlderTerm_ShouldThrow()
     {
-        var node = new RaftNode("node-1");
+        var node = CreateNode();
 
         node.StartElection();
 
@@ -78,7 +89,7 @@ public sealed class RaftNodeTests
     [Fact]
     public void HandleRequestVote_ShouldGrantVoteToEligibleCandidate()
     {
-        var node = new RaftNode("node-1");
+        var node = CreateNode();
 
         var request = new RequestVoteRequest(
             Term: 1,
@@ -98,7 +109,7 @@ public sealed class RaftNodeTests
     [Fact]
     public void HandleRequestVote_ShouldRejectOutdatedLog()
     {
-        var node = new RaftNode("node-1");
+        var node = CreateNode();
 
         node.UpdateLastLogInfo(index: 10, term: 2);
 
@@ -120,34 +131,44 @@ public sealed class RaftNodeTests
     [Fact]
     public void ReceiveVote_WithMajority_ShouldBecomeLeader()
     {
-        var node = new RaftNode("node-1");
+        var node = CreateNode();
 
         node.StartElection();
 
-        // The candidate already has its own vote.
+        // The candidate votes for itself.
         Assert.Equal(1, node.VotesReceived);
 
+        // First external vote: 2 out of 3 required votes.
         bool elected = node.ReceiveVote(
             voterId: "node-2",
             term: 1,
-            voteGranted: true,
-            clusterSize: 3
+            voteGranted: true
+        );
+
+        Assert.False(elected);
+        Assert.Equal(RaftNodeState.Candidate, node.State);
+
+        // Second external vote: quorum reached (3 out of 5).
+        elected = node.ReceiveVote(
+            voterId: "node-3",
+            term: 1,
+            voteGranted: true
         );
 
         Assert.True(elected);
         Assert.Equal(RaftNodeState.Leader, node.State);
-        Assert.Equal(2, node.VotesReceived);
+        Assert.Equal(3, node.VotesReceived);
     }
 
     [Fact]
     public void ReceiveVote_DuplicateVote_ShouldNotCountTwice()
     {
-        var node = new RaftNode("node-1");
+        var node = CreateNode();
 
         node.StartElection();
 
-        node.ReceiveVote("node-2", 1, true, 5);
-        node.ReceiveVote("node-2", 1, true, 5);
+        node.ReceiveVote("node-2", 1, true);
+        node.ReceiveVote("node-2", 1, true);
 
         Assert.Equal(2, node.VotesReceived);
         Assert.Equal(RaftNodeState.Candidate, node.State);
@@ -156,15 +177,14 @@ public sealed class RaftNodeTests
     [Fact]
     public void ReceiveVote_HigherTerm_ShouldBecomeFollower()
     {
-        var node = new RaftNode("node-1");
+        var node = CreateNode();
 
         node.StartElection();
 
         bool elected = node.ReceiveVote(
             voterId: "node-2",
             term: 2,
-            voteGranted: false,
-            clusterSize: 3
+            voteGranted: false
         );
 
         Assert.False(elected);
@@ -172,6 +192,218 @@ public sealed class RaftNodeTests
         Assert.Equal(2, node.CurrentTerm);
         Assert.Equal(0, node.VotesReceived);
     }
+
+    [Fact]
+    public void ReceiveVote_FromUnknownNode_ShouldNotBeCounted()
+    {
+        var cluster = new RaftClusterConfiguration(
+            ["node-1", "node-2", "node-3"]
+        );
+
+        var node = new RaftNode("node-1", cluster);
+
+        node.StartElection();
+
+        bool elected = node.ReceiveVote(
+            voterId: "unknown-node",
+            term: 1,
+            voteGranted: true
+        );
+
+        Assert.False(elected);
+        Assert.Equal(1, node.VotesReceived);
+        Assert.Equal(RaftNodeState.Candidate, node.State);
+    }
+
+
+    [Fact]
+    public async Task Restart_ShouldRestoreTermAndVote()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(),
+            "aegisdb-tests",
+            Guid.NewGuid().ToString("N"));
+
+        Directory.CreateDirectory(directory);
+
+        try
+        {
+            string path = Path.Combine(directory, "raft-state.json");
+
+            var cluster = new RaftClusterConfiguration(
+                ["node-1", "node-2", "node-3"]);
+
+            var store = new RaftStateStore(path);
+
+            var node = await RaftNode.CreateAsync(
+                "node-1", cluster, store);
+
+            await node.StartElectionAsync();
+
+            Assert.Equal(1, node.CurrentTerm);
+            Assert.Equal("node-1", node.VotedFor);
+            Assert.Equal(RaftNodeState.Candidate, node.State);
+
+            // Simulate a restart by constructing a new node
+            // from the persisted state.
+            var restartedNode = await RaftNode.CreateAsync(
+                "node-1",
+                cluster,
+                new RaftStateStore(path));
+
+            Assert.Equal(1, restartedNode.CurrentTerm);
+            Assert.Equal("node-1", restartedNode.VotedFor);
+            Assert.Equal(RaftNodeState.Follower, restartedNode.State);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+
+    [Fact]
+    public async Task BecomeFollowerAsync_WithHigherTerm_ShouldPersistState()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(),
+            "aegisdb-tests",
+            Guid.NewGuid().ToString("N"));
+
+        Directory.CreateDirectory(directory);
+
+        try
+        {
+            string path = Path.Combine(directory, "raft-state.json");
+
+            var cluster = new RaftClusterConfiguration(
+                ["node-1", "node-2", "node-3"]);
+
+            var store = new RaftStateStore(path);
+
+            var node = await RaftNode.CreateAsync(
+                "node-1", cluster, store);
+
+            await node.StartElectionAsync();
+
+            Assert.Equal(1, node.CurrentTerm);
+            Assert.Equal("node-1", node.VotedFor);
+            Assert.Equal(RaftNodeState.Candidate, node.State);
+
+            await node.BecomeFollowerAsync(5);
+
+            Assert.Equal(5, node.CurrentTerm);
+            Assert.Null(node.VotedFor);
+            Assert.Equal(RaftNodeState.Follower, node.State);
+
+            // Restart the node and verify that the newer term
+            // was durably stored.
+            var restartedNode = await RaftNode.CreateAsync(
+                "node-1",
+                cluster,
+                new RaftStateStore(path));
+
+            Assert.Equal(5, restartedNode.CurrentTerm);
+            Assert.Null(restartedNode.VotedFor);
+            Assert.Equal(RaftNodeState.Follower, restartedNode.State);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+
+    [Fact]
+    public async Task BecomeFollowerAsync_WithSameTerm_ShouldPreserveVote()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(),
+            "aegisdb-tests",
+            Guid.NewGuid().ToString("N"));
+
+        Directory.CreateDirectory(directory);
+
+        try
+        {
+            string path = Path.Combine(directory, "raft-state.json");
+
+            var cluster = new RaftClusterConfiguration(
+                ["node-1", "node-2", "node-3"]);
+
+            var node = await RaftNode.CreateAsync(
+                "node-1",
+                cluster,
+                new RaftStateStore(path));
+
+            await node.StartElectionAsync();
+            await node.BecomeFollowerAsync(1);
+
+            Assert.Equal(RaftNodeState.Follower, node.State);
+            Assert.Equal("node-1", node.VotedFor);
+
+            var restarted = await RaftNode.CreateAsync(
+                "node-1",
+                cluster,
+                new RaftStateStore(path));
+
+            Assert.Equal(1, restarted.CurrentTerm);
+            Assert.Equal("node-1", restarted.VotedFor);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+
+    [Fact]
+    public async Task ConcurrentElections_ShouldIncrementTermWithoutLostUpdates()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(),
+            "aegisdb-tests",
+            Guid.NewGuid().ToString("N"));
+
+        Directory.CreateDirectory(directory);
+
+        try
+        {
+            string path = Path.Combine(directory, "raft-state.json");
+
+            var cluster = new RaftClusterConfiguration(
+                ["node-1", "node-2", "node-3"]);
+
+            var node = await RaftNode.CreateAsync(
+                "node-1",
+                cluster,
+                new RaftStateStore(path));
+
+            const int electionCount = 20;
+
+            var elections = Enumerable.Range(0, electionCount)
+                .Select(_ => node.StartElectionAsync());
+
+            await Task.WhenAll(elections);
+
+            Assert.Equal(electionCount, node.CurrentTerm);
+            Assert.Equal(RaftNodeState.Candidate, node.State);
+            Assert.Equal("node-1", node.VotedFor);
+
+            var restarted = await RaftNode.CreateAsync(
+                "node-1",
+                cluster,
+                new RaftStateStore(path));
+
+            Assert.Equal(electionCount, restarted.CurrentTerm);
+            Assert.Equal("node-1", restarted.VotedFor);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
 
 
 }
