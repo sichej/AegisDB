@@ -414,5 +414,102 @@ public sealed class RaftNode
     }
 
 
+    /// <summary>
+    /// Evaluates a RequestVote RPC and persists any changes to
+    /// the current term or vote before returning the response.
+    ///
+    /// Raft state transitions are serialized using the node lock.
+    /// </summary>
+    public async Task<RequestVoteResponse> HandleRequestVoteAsync(
+        RequestVoteRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        if (string.IsNullOrWhiteSpace(request.CandidateId))
+        {
+            throw new ArgumentException(
+                "Candidate ID cannot be empty.",
+                nameof(request));
+        }
+
+        if (request.Term < 0 ||
+            request.LastLogIndex < 0 ||
+            request.LastLogTerm < 0 ||
+            (request.LastLogIndex == 0 && request.LastLogTerm != 0))
+        {
+            throw new ArgumentException(
+                "Invalid RequestVote log metadata or term.",
+                nameof(request));
+        }
+
+        if (_stateStore is null)
+        {
+            throw new InvalidOperationException(
+                "Persistent state store is not configured.");
+        }
+
+        await _stateLock.WaitAsync(cancellationToken);
+
+        try
+        {
+            // Ignore election requests from nodes outside the voting configuration.
+            if (!Cluster.Contains(request.CandidateId))
+            {
+                return new RequestVoteResponse(CurrentTerm, false);
+            }
+
+            if (request.Term < CurrentTerm)
+            {
+                return new RequestVoteResponse(CurrentTerm, false);
+            }
+
+            // A higher term invalidates our previous vote and candidacy.
+            if (request.Term > CurrentTerm)
+            {
+                await _stateStore.SaveAsync(
+                    new RaftPersistentState(request.Term, null),
+                    cancellationToken);
+
+                CurrentTerm = request.Term;
+                VotedFor = null;
+                State = RaftNodeState.Follower;
+                _votesReceived.Clear();
+            }
+
+            bool canVote =
+                VotedFor is null ||
+                VotedFor == request.CandidateId;
+
+            // Compare the candidate's last log term first,
+            // then its last log index.
+            bool logIsUpToDate =
+                request.LastLogTerm > LastLogTerm ||
+                (request.LastLogTerm == LastLogTerm &&
+                 request.LastLogIndex >= LastLogIndex);
+
+            if (!canVote || !logIsUpToDate)
+            {
+                return new RequestVoteResponse(CurrentTerm, false);
+            }
+
+            // The vote must be durable before it is granted.
+            if (VotedFor != request.CandidateId)
+            {
+                await _stateStore.SaveAsync(
+                    new RaftPersistentState(CurrentTerm, request.CandidateId),
+                    cancellationToken);
+
+                VotedFor = request.CandidateId;
+            }
+
+            return new RequestVoteResponse(CurrentTerm, true);
+        }
+        finally
+        {
+            _stateLock.Release();
+        }
+    }
+
 
 }

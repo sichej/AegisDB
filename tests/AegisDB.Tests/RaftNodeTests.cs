@@ -405,5 +405,191 @@ public sealed class RaftNodeTests
     }
 
 
+    [Fact]
+    public async Task HandleRequestVoteAsync_ShouldPersistGrantedVote()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(),
+            "aegisdb-tests",
+            Guid.NewGuid().ToString("N"));
+
+        Directory.CreateDirectory(directory);
+
+        try
+        {
+            string path = Path.Combine(directory, "raft-state.json");
+
+            var cluster = new RaftClusterConfiguration(
+                ["node-1", "node-2", "node-3"]);
+
+            var node = await RaftNode.CreateAsync(
+                "node-1",
+                cluster,
+                new RaftStateStore(path));
+
+            var response = await node.HandleRequestVoteAsync(
+                new RequestVoteRequest(
+                    Term: 3,
+                    CandidateId: "node-2",
+                    LastLogIndex: 0,
+                    LastLogTerm: 0));
+
+            Assert.True(response.VoteGranted);
+            Assert.Equal(3, response.Term);
+            Assert.Equal("node-2", node.VotedFor);
+
+            // The vote must survive a node restart.
+            var restarted = await RaftNode.CreateAsync(
+                "node-1",
+                cluster,
+                new RaftStateStore(path));
+
+            Assert.Equal(3, restarted.CurrentTerm);
+            Assert.Equal("node-2", restarted.VotedFor);
+            Assert.Equal(RaftNodeState.Follower, restarted.State);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+
+    [Fact]
+    public async Task HandleRequestVoteAsync_ShouldRejectSecondCandidateInSameTerm()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(),
+            "aegisdb-tests",
+            Guid.NewGuid().ToString("N"));
+
+        Directory.CreateDirectory(directory);
+
+        try
+        {
+            string path = Path.Combine(directory, "raft-state.json");
+
+            var cluster = new RaftClusterConfiguration(
+                ["node-1", "node-2", "node-3"]);
+
+            var node = await RaftNode.CreateAsync(
+                "node-1",
+                cluster,
+                new RaftStateStore(path));
+
+            var firstVote = await node.HandleRequestVoteAsync(
+                new RequestVoteRequest(3, "node-2", 0, 0));
+
+            var secondVote = await node.HandleRequestVoteAsync(
+                new RequestVoteRequest(3, "node-3", 0, 0));
+
+            Assert.True(firstVote.VoteGranted);
+            Assert.False(secondVote.VoteGranted);
+            Assert.Equal("node-2", node.VotedFor);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+
+    [Fact]
+    public async Task HandleRequestVoteAsync_UnknownCandidate_ShouldBeRejected()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(),
+            "aegisdb-tests",
+            Guid.NewGuid().ToString("N"));
+
+        Directory.CreateDirectory(directory);
+
+        try
+        {
+            string path = Path.Combine(directory, "raft-state.json");
+
+            var cluster = new RaftClusterConfiguration(
+                ["node-1", "node-2", "node-3"]);
+
+            var node = await RaftNode.CreateAsync(
+                "node-1",
+                cluster,
+                new RaftStateStore(path));
+
+            var response = await node.HandleRequestVoteAsync(
+                new RequestVoteRequest(
+                    Term: 100,
+                    CandidateId: "unknown-node",
+                    LastLogIndex: 0,
+                    LastLogTerm: 0));
+
+            Assert.False(response.VoteGranted);
+            Assert.Equal(0, response.Term);
+            Assert.Equal(0, node.CurrentTerm);
+            Assert.Null(node.VotedFor);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+
+    [Fact]
+    public async Task HandleRequestVoteAsync_ConcurrentCandidates_ShouldGrantOnlyOneVote()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(),
+            "aegisdb-tests",
+            Guid.NewGuid().ToString("N"));
+
+        Directory.CreateDirectory(directory);
+
+        try
+        {
+            string path = Path.Combine(directory, "raft-state.json");
+
+            var cluster = new RaftClusterConfiguration(
+                ["node-1", "node-2", "node-3"]);
+
+            var node = await RaftNode.CreateAsync(
+                "node-1",
+                cluster,
+                new RaftStateStore(path));
+
+            var request2 = new RequestVoteRequest(
+                5, "node-2", 0, 0);
+
+            var request3 = new RequestVoteRequest(
+                5, "node-3", 0, 0);
+
+            // Both candidates request a vote in the same term.
+            var responses = await Task.WhenAll(
+                Task.Run(() => node.HandleRequestVoteAsync(request2)),
+                Task.Run(() => node.HandleRequestVoteAsync(request3)));
+
+            Assert.Single(responses, r => r.VoteGranted);
+
+            Assert.Equal(5, node.CurrentTerm);
+            Assert.Contains(
+                node.VotedFor,
+                new[] { "node-2", "node-3" });
+
+            // Verify that the chosen vote survives a restart.
+            var restarted = await RaftNode.CreateAsync(
+                "node-1",
+                cluster,
+                new RaftStateStore(path));
+
+            Assert.Equal(5, restarted.CurrentTerm);
+            Assert.Equal(node.VotedFor, restarted.VotedFor);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+
 
 }
