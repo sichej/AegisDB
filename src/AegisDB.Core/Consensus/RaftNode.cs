@@ -37,13 +37,13 @@ public sealed class RaftNode
     /// Index of the last entry in the local Raft log.
     /// Zero indicates an empty log.
     /// </summary>
-    public long LastLogIndex { get; private set; }
+    public long LastLogIndex => Log.LastIndex;
 
     /// <summary>
     /// Term of the last entry in the local Raft log.
     /// Zero indicates an empty log.
     /// </summary>
-    public long LastLogTerm { get; private set; }
+    public long LastLogTerm => Log.LastTerm;
 
     private readonly HashSet<string> _votesReceived = new();
 
@@ -62,6 +62,8 @@ public sealed class RaftNode
     /// </summary>
     private readonly SemaphoreSlim _stateLock = new(1, 1);
 
+    public RaftLog Log { get; }
+
     public RaftNode(
         string nodeId,
         RaftClusterConfiguration cluster,
@@ -76,6 +78,8 @@ public sealed class RaftNode
                 "The local node must be a cluster member.",
                 nameof(nodeId));
         }
+
+        Log = new RaftLog();
 
         NodeId = nodeId;
         Cluster = cluster;
@@ -148,21 +152,6 @@ public sealed class RaftNode
 
         // Votes collected during a previous candidacy are no longer valid.
         _votesReceived.Clear();
-    }
-
-    /// <summary>
-    /// Updates the local log metadata.
-    ///
-    /// Temporary helper used until RaftNode is connected
-    /// to the persistent Raft log.
-    /// </summary>
-    public void UpdateLastLogInfo(long index, long term)
-    {
-        if (index < 0 || term < 0 || (index == 0 && term != 0))
-            throw new ArgumentOutOfRangeException(nameof(index));
-
-        LastLogIndex = index;
-        LastLogTerm = term;
     }
 
 
