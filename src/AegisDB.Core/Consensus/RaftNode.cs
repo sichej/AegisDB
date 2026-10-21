@@ -1,6 +1,7 @@
 
 using AegisDB.Core.Consensus.Messages;
 using AegisDB.Core.Consensus.Persistence;
+using AegisDB.Core.Storage;
 
 namespace AegisDB.Core.Consensus;
 
@@ -64,6 +65,24 @@ public sealed class RaftNode
 
     public RaftLog Log { get; }
 
+    /// <summary>
+    /// Highest log index known to be committed.
+    ///
+    /// This is volatile Raft state and starts at zero.
+    /// Committed entries must never be overwritten.
+    /// </summary>
+    public long CommitIndex { get; private set; }
+
+    /// <summary>
+    /// Highest committed log index applied to the state machine.
+    /// </summary>
+    public long LastApplied { get; private set; }
+
+    private readonly RaftStateMachine _stateMachine;
+
+    public KeyValueStore Store { get; }
+
+
     public RaftNode(
         string nodeId,
         RaftClusterConfiguration cluster,
@@ -81,10 +100,15 @@ public sealed class RaftNode
 
         Log = new RaftLog();
 
+        Store = new KeyValueStore();
+        _stateMachine = new RaftStateMachine(Store);
+
         NodeId = nodeId;
         Cluster = cluster;
         _stateStore = stateStore;
 
+        CommitIndex = 0;
+        LastApplied = 0;
         CurrentTerm = 0;
         VotedFor = null;
         State = RaftNodeState.Follower;
@@ -589,6 +613,116 @@ public sealed class RaftNode
             _stateLock.Release();
         }
     }
+
+
+    /// <summary>
+    /// Advances the local commit index without allowing it to move backward.
+    ///
+    /// The caller must establish that the supplied index is committed
+    /// according to the Raft protocol before invoking this method.
+    /// </summary>
+    public async Task AdvanceCommitIndexAsync(
+        long newCommitIndex,
+        CancellationToken cancellationToken = default)
+    {
+        await _stateLock.WaitAsync(cancellationToken);
+
+        try
+        {
+            if (newCommitIndex < CommitIndex)
+            {
+                throw new InvalidOperationException(
+                    "Commit index cannot move backward.");
+            }
+
+            if (newCommitIndex > Log.LastIndex)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(newCommitIndex),
+                    "Cannot commit entries that do not exist.");
+            }
+
+            CommitIndex = newCommitIndex;
+        }
+        finally
+        {
+            _stateLock.Release();
+        }
+    }
+
+
+    /// <summary>
+    /// Records that committed log entries have been applied
+    /// to the state machine.
+    ///
+    /// The caller must apply the corresponding commands successfully
+    /// before advancing this index.
+    /// </summary>
+    public async Task AdvanceLastAppliedAsync(
+        long newLastApplied,
+        CancellationToken cancellationToken = default)
+    {
+        await _stateLock.WaitAsync(cancellationToken);
+
+        try
+        {
+            if (newLastApplied < LastApplied)
+            {
+                throw new InvalidOperationException(
+                    "LastApplied cannot move backward.");
+            }
+
+            if (newLastApplied > CommitIndex)
+            {
+                throw new InvalidOperationException(
+                    "Cannot apply entries that are not committed.");
+            }
+
+            LastApplied = newLastApplied;
+        }
+        finally
+        {
+            _stateLock.Release();
+        }
+    }
+
+
+    /// <summary>
+    /// Applies all committed but not yet applied Raft log entries
+    /// to the local state machine, in log order.
+    ///
+    /// The node lock prevents concurrent apply operations and
+    /// protects the LastApplied progression.
+    /// </summary>
+    public async Task ApplyCommittedEntriesAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await _stateLock.WaitAsync(cancellationToken);
+
+        try
+        {
+            while (LastApplied < CommitIndex)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                long nextIndex = LastApplied + 1;
+
+                RaftLogEntry entry = Log.GetEntry(nextIndex)
+                    ?? throw new InvalidOperationException(
+                        $"Missing committed Raft entry at index {nextIndex}.");
+
+                // Apply the operation before advancing LastApplied.
+                _stateMachine.Apply(entry);
+
+                LastApplied = nextIndex;
+            }
+        }
+        finally
+        {
+            _stateLock.Release();
+        }
+    }
+
 
 
 }
