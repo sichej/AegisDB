@@ -51,7 +51,7 @@ public sealed class SnapshotStore
             {
                 return;
             }
-            
+
             string tempPath = _filePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
 
             try
