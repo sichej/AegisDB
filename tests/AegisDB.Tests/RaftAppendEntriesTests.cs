@@ -2,6 +2,7 @@
 using AegisDB.Core.Consensus;
 using AegisDB.Core.Consensus.Messages;
 using AegisDB.Core.Consensus.Persistence;
+using AegisDB.Core.Persistence;
 
 namespace AegisDB.Tests;
 
@@ -147,5 +148,120 @@ public sealed class RaftAppendEntriesTests
             Directory.Delete(directory, recursive: true);
         }
     }
+
+
+    [Fact]
+    public async Task AppendEntries_ShouldReplaceUncommittedConflicts()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(),
+            "aegisdb-tests",
+            Guid.NewGuid().ToString("N"));
+
+        Directory.CreateDirectory(directory);
+
+        try
+        {
+            var cluster = new RaftClusterConfiguration(
+                ["node-1", "node-2", "node-3"]);
+
+            var node = await RaftNode.CreateAsync(
+                "node-2",
+                cluster,
+                new RaftStateStore(
+                    Path.Combine(directory, "raft-state.json")));
+
+            static RaftLogEntry Entry(long index, long term) =>
+                new(index, term,
+                    new WalRecord(
+                        WalOperation.Put,
+                        $"key-{index}",
+                        [1, 2, 3]));
+
+            node.Log.Append(Entry(1, 1));
+            node.Log.Append(Entry(2, 1));
+            node.Log.Append(Entry(3, 2));
+            node.Log.Append(Entry(4, 2));
+            node.Log.Append(Entry(5, 2));
+
+            await node.AdvanceCommitIndexAsync(3);
+
+            var response = await node.HandleAppendEntriesAsync(
+                new AppendEntriesRequest(
+                    Term: 3,
+                    LeaderId: "node-1",
+                    PrevLogIndex: 3,
+                    PrevLogTerm: 2,
+                    Entries: [Entry(4, 3), Entry(5, 3)],
+                    LeaderCommit: 3));
+
+            Assert.True(response.Success);
+            Assert.Equal(5, node.Log.LastIndex);
+            Assert.Equal(3, node.Log.GetEntry(4)?.Term);
+            Assert.Equal(3, node.Log.GetEntry(5)?.Term);
+            Assert.Equal(3, node.CommitIndex);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+
+    [Fact]
+    public async Task AppendEntries_ShouldRejectCommittedConflict()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(),
+            "aegisdb-tests",
+            Guid.NewGuid().ToString("N"));
+
+        Directory.CreateDirectory(directory);
+
+        try
+        {
+            var cluster = new RaftClusterConfiguration(
+                ["node-1", "node-2", "node-3"]);
+
+            var node = await RaftNode.CreateAsync(
+                "node-2",
+                cluster,
+                new RaftStateStore(
+                    Path.Combine(directory, "raft-state.json")));
+
+            static RaftLogEntry Entry(long index, long term) =>
+                new(index, term,
+                    new WalRecord(
+                        WalOperation.Put,
+                        $"key-{index}",
+                        [1, 2, 3]));
+
+            node.Log.Append(Entry(1, 1));
+            node.Log.Append(Entry(2, 1));
+            node.Log.Append(Entry(3, 2));
+            node.Log.Append(Entry(4, 2));
+
+            await node.AdvanceCommitIndexAsync(4);
+
+            var response = await node.HandleAppendEntriesAsync(
+                new AppendEntriesRequest(
+                    Term: 3,
+                    LeaderId: "node-1",
+                    PrevLogIndex: 3,
+                    PrevLogTerm: 2,
+                    Entries: [Entry(4, 3)],
+                    LeaderCommit: 4));
+
+            Assert.False(response.Success);
+            Assert.Equal(2, node.Log.GetEntry(4)?.Term);
+            Assert.Equal(4, node.CommitIndex);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+
 
 }

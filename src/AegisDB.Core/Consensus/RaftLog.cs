@@ -223,4 +223,40 @@ public sealed class RaftLog
     }
 
 
+    /// <summary>
+    /// Finds the first conflicting index between incoming entries
+    /// and the local log.
+    ///
+    /// Returns null when no conflicting term exists among entries
+    /// already present in the local log.
+    /// </summary>
+    public long? FindFirstConflict(
+        IReadOnlyList<RaftLogEntry> entries)
+    {
+        ArgumentNullException.ThrowIfNull(entries);
+
+        lock (_lock)
+        {
+            foreach (RaftLogEntry entry in entries)
+            {
+                ArgumentNullException.ThrowIfNull(entry);
+
+                if (entry.Index < 1)
+                    throw new ArgumentOutOfRangeException(nameof(entries));
+
+                if (entry.Index > _entries.Count)
+                    break;
+
+                if (_entries[checked((int)(entry.Index - 1))].Term != entry.Term)
+                {
+                    return entry.Index;
+                }
+            }
+
+            return null;
+        }
+    }
+
+
+
 }

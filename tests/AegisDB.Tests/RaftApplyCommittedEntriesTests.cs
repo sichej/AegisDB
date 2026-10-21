@@ -2,6 +2,7 @@
 using System.Text;
 using AegisDB.Core.Consensus;
 using AegisDB.Core.Persistence;
+using AegisDB.Core.Storage;
 
 namespace AegisDB.Tests;
 
@@ -13,7 +14,13 @@ public sealed class RaftApplyCommittedEntriesTests
         var cluster = new RaftClusterConfiguration(
             ["node-1", "node-2", "node-3"]);
 
-        var node = new RaftNode("node-1", cluster);
+        var store = new KeyValueStore();
+        var stateMachine = new RaftStateMachine(store);
+
+        var node = new RaftNode(
+            "node-1",
+            cluster,
+            stateMachine: stateMachine);
 
         node.Log.Append(new RaftLogEntry(
             1, 1,
@@ -51,12 +58,12 @@ public sealed class RaftApplyCommittedEntriesTests
         Assert.Equal(3, node.LastApplied);
         Assert.Equal(3, node.CommitIndex);
 
-        Assert.Null(node.Store.Get("user:1"));
+        Assert.Null(store.Get("user:1"));
 
         Assert.Equal(
             "Bob",
-            Encoding.UTF8.GetString(node.Store.Get("user:2")!));
+            Encoding.UTF8.GetString(store.Get("user:2")!));
 
-        Assert.Null(node.Store.Get("user:3"));
+        Assert.Null(store.Get("user:3"));
     }
 }

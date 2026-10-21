@@ -10,7 +10,7 @@ namespace AegisDB.Core.Consensus;
 /// This component does not decide which entries are committed.
 /// It only executes commands supplied by the consensus layer.
 /// </summary>
-public sealed class RaftStateMachine
+public sealed class RaftStateMachine : IRaftStateMachine
 {
     private readonly KeyValueStore _store;
 

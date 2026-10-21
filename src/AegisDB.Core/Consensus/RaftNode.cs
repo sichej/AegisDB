@@ -1,6 +1,7 @@
 
 using AegisDB.Core.Consensus.Messages;
 using AegisDB.Core.Consensus.Persistence;
+using AegisDB.Core.Persistence;
 using AegisDB.Core.Storage;
 
 namespace AegisDB.Core.Consensus;
@@ -78,15 +79,14 @@ public sealed class RaftNode
     /// </summary>
     public long LastApplied { get; private set; }
 
-    private readonly RaftStateMachine _stateMachine;
-
-    public KeyValueStore Store { get; }
+    private readonly IRaftStateMachine _stateMachine;
 
 
     public RaftNode(
         string nodeId,
         RaftClusterConfiguration cluster,
-        RaftStateStore? stateStore = null)
+        RaftStateStore? stateStore = null,
+        IRaftStateMachine? stateMachine = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(nodeId);
         ArgumentNullException.ThrowIfNull(cluster);
@@ -98,21 +98,23 @@ public sealed class RaftNode
                 nameof(nodeId));
         }
 
-        Log = new RaftLog();
-
-        Store = new KeyValueStore();
-        _stateMachine = new RaftStateMachine(Store);
-
         NodeId = nodeId;
         Cluster = cluster;
         _stateStore = stateStore;
 
-        CommitIndex = 0;
-        LastApplied = 0;
+        Log = new RaftLog();
+
+        _stateMachine = stateMachine
+            ?? new RaftStateMachine(new KeyValueStore());
+
         CurrentTerm = 0;
         VotedFor = null;
         State = RaftNodeState.Follower;
+
+        CommitIndex = 0;
+        LastApplied = 0;
     }
+
 
 
     /// <summary>
@@ -559,12 +561,6 @@ public sealed class RaftNode
                 nameof(request));
         }
 
-        if (request.Entries.Count != 0)
-        {
-            throw new NotSupportedException(
-                "Log replication is not implemented yet.");
-        }
-
         await _stateLock.WaitAsync(cancellationToken);
 
         try
@@ -598,7 +594,8 @@ public sealed class RaftNode
             State = RaftNodeState.Follower;
             _votesReceived.Clear();
 
-            // Verify that the follower contains the preceding log entry.
+
+            // The follower must contain the entry preceding the batch.
             if (!Log.Matches(
                 request.PrevLogIndex,
                 request.PrevLogTerm))
@@ -606,7 +603,43 @@ public sealed class RaftNode
                 return new AppendEntriesResponse(CurrentTerm, false);
             }
 
+            // Validate the complete batch before modifying the log.
+            // The first entry must immediately follow PrevLogIndex.
+            long expectedIndex = request.PrevLogIndex;
+
+            foreach (RaftLogEntry entry in request.Entries)
+            {
+                if (entry is null ||
+                    entry.Index != ++expectedIndex ||
+                    entry.Term < 0 ||
+                    entry.Term > request.Term ||
+                    entry.Command is null ||
+                    string.IsNullOrEmpty(entry.Command.Key) ||
+                    (entry.Command.Operation == WalOperation.Put &&
+                     entry.Command.Value is null) ||
+                    (entry.Command.Operation == WalOperation.Delete &&
+                     entry.Command.Value is not null) ||
+                    (entry.Command.Operation != WalOperation.Put &&
+                     entry.Command.Operation != WalOperation.Delete))
+                {
+                    return new AppendEntriesResponse(CurrentTerm, false);
+                }
+            }
+
+            // Never allow a conflicting entry to overwrite committed data.
+            long? firstConflict = Log.FindFirstConflict(request.Entries);
+
+            if (firstConflict is not null &&
+                firstConflict.Value <= CommitIndex)
+            {
+                return new AppendEntriesResponse(CurrentTerm, false);
+            }
+
+            // Reconcile the incoming entries with the local log.
+            Log.AppendEntries(request.Entries);
+
             return new AppendEntriesResponse(CurrentTerm, true);
+
         }
         finally
         {
