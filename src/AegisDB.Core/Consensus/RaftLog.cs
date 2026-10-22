@@ -65,7 +65,7 @@ public sealed class RaftLog : IRaftLogReader
                     "Raft term cannot be negative.");
             }
 
-            _entries.Add(entry);
+            _entries.Add(CloneEntry(entry));
         }
     }
 
@@ -166,7 +166,9 @@ public sealed class RaftLog : IRaftLogReader
 
             // Snapshot the incoming collection to prevent external
             // changes to its structure during reconciliation.
-            RaftLogEntry[] incoming = entries.ToArray();
+            RaftLogEntry[] incoming = entries
+                .Select(entry => CloneEntry(entry))
+                .ToArray();
 
             // Validate the entire sequence before changing the log.
             for (int i = 0; i < incoming.Length; i++)
@@ -328,6 +330,20 @@ public sealed class RaftLog : IRaftLogReader
         {
             _entries = replacement;
         }
+    }
+
+    /// <summary>
+    /// Creates an independent copy of an entry and its mutable command data.
+    /// </summary>
+    private static RaftLogEntry CloneEntry(RaftLogEntry entry)
+    {
+        return entry with
+        {
+            Command = entry.Command with
+            {
+                Value = entry.Command.Value?.ToArray()
+            }
+        };
     }
 
 

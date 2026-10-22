@@ -250,4 +250,26 @@ public sealed class RaftLogTests
         Assert.Equal(1, log.LastTerm);
     }
 
+    [Fact]
+    public void Append_ShouldDefensivelyCopyCommandValue()
+    {
+        var log = new RaftLog();
+
+        byte[] original = "Alice"u8.ToArray();
+
+        log.Append(new RaftLogEntry(
+            1,
+            1,
+            new WalRecord(WalOperation.Put, "user:1", original)));
+
+        original[0] = (byte)'M';
+
+        var stored = log.GetEntry(1);
+
+        Assert.Equal(
+            "Alice",
+            System.Text.Encoding.UTF8.GetString(
+                stored!.Command.Value!));
+    }
+
 }
