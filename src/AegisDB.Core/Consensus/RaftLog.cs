@@ -10,7 +10,7 @@ namespace AegisDB.Core.Consensus;
 /// This implementation is currently in-memory and does not
 /// support log truncation or snapshot compaction.
 /// </summary>
-public sealed class RaftLog
+public sealed class RaftLog : IRaftLogReader
 {
     private List<RaftLogEntry> _entries = new();
     private readonly object _lock = new();
@@ -80,9 +80,19 @@ public sealed class RaftLog
             if (index < 1 || index > _entries.Count)
                 return null;
 
-            return _entries[checked((int)(index - 1))];
+            RaftLogEntry entry = _entries[checked((int)(index - 1))];
+
+            // Return a defensive copy of mutable command data.
+            return entry with
+            {
+                Command = entry.Command with
+                {
+                    Value = entry.Command.Value?.ToArray()
+                }
+            };
         }
     }
+
 
     /// <summary>
     /// Checks whether the local log contains an entry

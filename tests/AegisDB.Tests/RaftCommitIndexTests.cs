@@ -11,11 +11,11 @@ public sealed class RaftCommitIndexTests
         var cluster = new RaftClusterConfiguration(
             ["node-1", "node-2", "node-3"]);
 
-        var node = new RaftNode("node-1", cluster);
+        var entries = new List<RaftLogEntry>();
 
         for (long index = 1; index <= 5; index++)
         {
-            node.Log.Append(new RaftLogEntry(
+            entries.Add(new RaftLogEntry(
                 Index: index,
                 Term: 1,
                 Command: new WalRecord(
@@ -24,7 +24,7 @@ public sealed class RaftCommitIndexTests
                     [1, 2, 3])));
         }
 
-        return node;
+        return new RaftNode("node-1", cluster, initialEntries: entries);
     }
 
     [Fact]

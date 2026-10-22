@@ -64,7 +64,9 @@ public sealed class RaftNode
     /// </summary>
     private readonly SemaphoreSlim _stateLock = new(1, 1);
 
-    public RaftLog Log { get; }
+    private readonly RaftLog _log;
+
+    public IRaftLogReader Log => _log;
 
     /// <summary>
     /// Highest log index known to be committed.
@@ -106,7 +108,7 @@ public sealed class RaftNode
         _stateStore = stateStore;
         _logStore = logStore;
 
-        Log = new RaftLog();
+        _log = new RaftLog();
 
         _stateMachine = stateMachine
             ?? new RaftStateMachine(new KeyValueStore());
@@ -119,6 +121,22 @@ public sealed class RaftNode
         LastApplied = 0;
     }
 
+
+    /// <summary>
+    /// Creates a node with a predefined log for testing.
+    ///
+    /// The initial log is loaded before the node is used,
+    /// avoiding external mutation of its log after construction.
+    /// </summary>
+    internal RaftNode(
+        string nodeId,
+        RaftClusterConfiguration cluster,
+        IReadOnlyList<RaftLogEntry> initialEntries,
+        IRaftStateMachine? stateMachine = null)
+        : this(nodeId, cluster, stateMachine: stateMachine)
+    {
+        _log.ReplaceAll(initialEntries);
+    }
 
 
     /// <summary>
@@ -321,7 +339,7 @@ public sealed class RaftNode
 
         foreach (RaftLogEntry entry in persistedEntries)
         {
-            node.Log.Append(entry);
+            node._log.Append(entry);
         }
 
         node.CurrentTerm = persistedState.CurrentTerm;
@@ -644,7 +662,7 @@ public sealed class RaftNode
             }
 
             // Never allow a conflicting entry to overwrite committed data.
-            long? firstConflict = Log.FindFirstConflict(request.Entries);
+            long? firstConflict = _log.FindFirstConflict(request.Entries);
 
             if (firstConflict is not null &&
                 firstConflict.Value <= CommitIndex)
@@ -671,7 +689,7 @@ public sealed class RaftNode
 
                 await _logStore.SaveAsync(updatedEntries, cancellationToken);
 
-                Log.ReplaceAll(updatedEntries);
+                _log.ReplaceAll(updatedEntries);
             }
 
             // The last index covered by this AppendEntries request.
@@ -806,7 +824,4 @@ public sealed class RaftNode
             _stateLock.Release();
         }
     }
-
-
-
 }

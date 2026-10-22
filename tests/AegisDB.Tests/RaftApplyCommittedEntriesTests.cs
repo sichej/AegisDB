@@ -17,38 +17,39 @@ public sealed class RaftApplyCommittedEntriesTests
         var store = new KeyValueStore();
         var stateMachine = new RaftStateMachine(store);
 
+        RaftLogEntry[] entries =
+        [
+            new RaftLogEntry(
+                1, 1,
+                new WalRecord(
+                    WalOperation.Put,
+                    "user:1",
+                    Encoding.UTF8.GetBytes("Alice"))),
+            new RaftLogEntry(
+                2, 1,
+                new WalRecord(
+                    WalOperation.Put,
+                    "user:2",
+                    Encoding.UTF8.GetBytes("Bob"))),
+            new RaftLogEntry(
+                3, 1,
+                new WalRecord(
+                    WalOperation.Delete,
+                    "user:1",
+                    null)),
+            new RaftLogEntry(
+                4, 1,
+                new WalRecord(
+                    WalOperation.Put,
+                    "user:3",
+                    Encoding.UTF8.GetBytes("Charlie")))
+        ];
+
         var node = new RaftNode(
             "node-1",
             cluster,
+            initialEntries: entries,
             stateMachine: stateMachine);
-
-        node.Log.Append(new RaftLogEntry(
-            1, 1,
-            new WalRecord(
-                WalOperation.Put,
-                "user:1",
-                Encoding.UTF8.GetBytes("Alice"))));
-
-        node.Log.Append(new RaftLogEntry(
-            2, 1,
-            new WalRecord(
-                WalOperation.Put,
-                "user:2",
-                Encoding.UTF8.GetBytes("Bob"))));
-
-        node.Log.Append(new RaftLogEntry(
-            3, 1,
-            new WalRecord(
-                WalOperation.Delete,
-                "user:1",
-                null)));
-
-        node.Log.Append(new RaftLogEntry(
-            4, 1,
-            new WalRecord(
-                WalOperation.Put,
-                "user:3",
-                Encoding.UTF8.GetBytes("Charlie"))));
 
         // The fourth entry has not been committed.
         await node.AdvanceCommitIndexAsync(3);

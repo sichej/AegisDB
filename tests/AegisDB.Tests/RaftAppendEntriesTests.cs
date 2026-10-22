@@ -174,14 +174,6 @@ public sealed class RaftAppendEntriesTests
             var cluster = new RaftClusterConfiguration(
                 ["node-1", "node-2", "node-3"]);
 
-            var node = await RaftNode.CreateAsync(
-                "node-2",
-                cluster,
-                new RaftStateStore(
-                    Path.Combine(directory, "raft-state.json")),
-                new RaftLogStore(
-                    Path.Combine(directory, "raft-log.json")));
-
             static RaftLogEntry Entry(long index, long term) =>
                 new(index, term,
                     new WalRecord(
@@ -189,11 +181,18 @@ public sealed class RaftAppendEntriesTests
                         $"key-{index}",
                         [1, 2, 3]));
 
-            node.Log.Append(Entry(1, 1));
-            node.Log.Append(Entry(2, 1));
-            node.Log.Append(Entry(3, 2));
-            node.Log.Append(Entry(4, 2));
-            node.Log.Append(Entry(5, 2));
+            var logStore = new RaftLogStore(
+                Path.Combine(directory, "raft-log.json"));
+
+            await logStore.SaveAsync(
+                [Entry(1, 1), Entry(2, 1), Entry(3, 2), Entry(4, 2), Entry(5, 2)]);
+
+            var node = await RaftNode.CreateAsync(
+                "node-2",
+                cluster,
+                new RaftStateStore(
+                    Path.Combine(directory, "raft-state.json")),
+                logStore);
 
             await node.AdvanceCommitIndexAsync(3);
 
@@ -234,12 +233,6 @@ public sealed class RaftAppendEntriesTests
             var cluster = new RaftClusterConfiguration(
                 ["node-1", "node-2", "node-3"]);
 
-            var node = await RaftNode.CreateAsync(
-                "node-2",
-                cluster,
-                new RaftStateStore(
-                    Path.Combine(directory, "raft-state.json")));
-
             static RaftLogEntry Entry(long index, long term) =>
                 new(index, term,
                     new WalRecord(
@@ -247,10 +240,18 @@ public sealed class RaftAppendEntriesTests
                         $"key-{index}",
                         [1, 2, 3]));
 
-            node.Log.Append(Entry(1, 1));
-            node.Log.Append(Entry(2, 1));
-            node.Log.Append(Entry(3, 2));
-            node.Log.Append(Entry(4, 2));
+            var logStore = new RaftLogStore(
+                Path.Combine(directory, "raft-log.json"));
+
+            await logStore.SaveAsync(
+                [Entry(1, 1), Entry(2, 1), Entry(3, 2), Entry(4, 2)]);
+
+            var node = await RaftNode.CreateAsync(
+                "node-2",
+                cluster,
+                new RaftStateStore(
+                    Path.Combine(directory, "raft-state.json")),
+                logStore);
 
             await node.AdvanceCommitIndexAsync(4);
 

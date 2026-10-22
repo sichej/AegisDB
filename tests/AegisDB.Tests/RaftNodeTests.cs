@@ -12,13 +12,15 @@ namespace AegisDB.Tests;
 public sealed class RaftNodeTests
 {
 
-    private static RaftNode CreateNode()
+    private static RaftNode CreateNode(
+        IReadOnlyList<RaftLogEntry>? initialEntries = null)
     {
         var cluster = new RaftClusterConfiguration(
             ["node-1", "node-2", "node-3", "node-4", "node-5"]
         );
 
-        return new RaftNode("node-1", cluster);
+        return new RaftNode(
+            "node-1", cluster, initialEntries: initialEntries ?? []);
     }
 
     [Fact]
@@ -111,13 +113,13 @@ public sealed class RaftNodeTests
     [Fact]
     public void HandleRequestVote_ShouldRejectOutdatedLog()
     {
-        var node = CreateNode();
+        var entries = new List<RaftLogEntry>();
 
         // Build the actual Raft log rather than manually
         // setting its last index and term.
         for (long index = 1; index <= 10; index++)
         {
-            node.Log.Append(new RaftLogEntry(
+            entries.Add(new RaftLogEntry(
                 Index: index,
                 Term: 2,
                 Command: new WalRecord(
@@ -126,6 +128,8 @@ public sealed class RaftNodeTests
                     [1, 2, 3])
             ));
         }
+
+        var node = CreateNode(initialEntries: entries);
 
         var request = new RequestVoteRequest(
             Term: 3,
@@ -613,14 +617,16 @@ public sealed class RaftNodeTests
         Assert.Equal(0, node.LastLogIndex);
         Assert.Equal(0, node.LastLogTerm);
 
-        node.Log.Append(new RaftLogEntry(
-            Index: 1,
-            Term: 3,
-            Command: new WalRecord(
-                WalOperation.Put,
-                "user:1",
-                "Alice"u8.ToArray())
-        ));
+        node = CreateNode(initialEntries:
+        [
+            new RaftLogEntry(
+                Index: 1,
+                Term: 3,
+                Command: new WalRecord(
+                    WalOperation.Put,
+                    "user:1",
+                    "Alice"u8.ToArray()))
+        ]);
 
         Assert.Equal(1, node.LastLogIndex);
         Assert.Equal(3, node.LastLogTerm);
