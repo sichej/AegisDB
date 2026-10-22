@@ -838,7 +838,7 @@ public sealed class RaftNode
         }
     }
 
-
+  
     /// <summary>
     /// Processes a vote response while holding the Raft state lock.
     ///
@@ -928,6 +928,5 @@ public sealed class RaftNode
             _stateLock.Release();
         }
     }
-
 
 }
