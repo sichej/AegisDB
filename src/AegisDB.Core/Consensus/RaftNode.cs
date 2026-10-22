@@ -81,12 +81,15 @@ public sealed class RaftNode
 
     private readonly IRaftStateMachine _stateMachine;
 
+    private readonly RaftLogStore? _logStore;
+
 
     public RaftNode(
         string nodeId,
         RaftClusterConfiguration cluster,
         RaftStateStore? stateStore = null,
-        IRaftStateMachine? stateMachine = null)
+        IRaftStateMachine? stateMachine = null,
+        RaftLogStore? logStore = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(nodeId);
         ArgumentNullException.ThrowIfNull(cluster);
@@ -101,6 +104,7 @@ public sealed class RaftNode
         NodeId = nodeId;
         Cluster = cluster;
         _stateStore = stateStore;
+        _logStore = logStore;
 
         Log = new RaftLog();
 
@@ -288,27 +292,40 @@ public sealed class RaftNode
     }
 
 
+
     /// <summary>
-    /// Creates a Raft node by restoring its persistent election state.
+    /// Restores a Raft node's persistent election state and replicated log.
     ///
-    /// A restarted node always begins as a Follower, while its
-    /// current term and previous vote are recovered from disk.
+    /// A restarted node always begins as a Follower.
     /// </summary>
     public static async Task<RaftNode> CreateAsync(
         string nodeId,
         RaftClusterConfiguration cluster,
         RaftStateStore stateStore,
+        RaftLogStore? logStore = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(stateStore);
 
         var persistedState = await stateStore.LoadAsync(cancellationToken);
 
-        var node = new RaftNode(nodeId, cluster, stateStore)
+        IReadOnlyList<RaftLogEntry> persistedEntries = logStore is null
+            ? []
+            : await logStore.LoadAsync(cancellationToken);
+
+        var node = new RaftNode(
+            nodeId,
+            cluster,
+            stateStore: stateStore,
+            logStore: logStore);
+
+        foreach (RaftLogEntry entry in persistedEntries)
         {
-            CurrentTerm = persistedState.CurrentTerm,
-            VotedFor = persistedState.VotedFor
-        };
+            node.Log.Append(entry);
+        }
+
+        node.CurrentTerm = persistedState.CurrentTerm;
+        node.VotedFor = persistedState.VotedFor;
 
         return node;
     }
