@@ -3,9 +3,13 @@ name: AegisDB CI
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - development
+
   pull_request:
-    branches: [main]
+    branches:
+      - main
 
 permissions:
   contents: read
