@@ -28,7 +28,10 @@ public sealed class RaftAppendEntriesTests
             var node = await RaftNode.CreateAsync(
                 "node-2",
                 cluster,
-                new RaftStateStore(path));
+                new RaftStateStore(
+                    Path.Combine(directory, "raft-state.json")),
+                new RaftLogStore(
+                    Path.Combine(directory, "raft-log.json")));
 
             await node.StartElectionAsync();
 
@@ -81,7 +84,10 @@ public sealed class RaftAppendEntriesTests
             var node = await RaftNode.CreateAsync(
                 "node-2",
                 cluster,
-                new RaftStateStore(path));
+                new RaftStateStore(
+                    Path.Combine(directory, "raft-state.json")),
+                new RaftLogStore(
+                    Path.Combine(directory, "raft-log.json")));
 
             await node.BecomeFollowerAsync(5);
 
@@ -125,7 +131,10 @@ public sealed class RaftAppendEntriesTests
             var node = await RaftNode.CreateAsync(
                 "node-2",
                 cluster,
-                new RaftStateStore(path));
+                new RaftStateStore(
+                    Path.Combine(directory, "raft-state.json")),
+                new RaftLogStore(
+                    Path.Combine(directory, "raft-log.json")));
 
             var response = await node.HandleAppendEntriesAsync(
                 new AppendEntriesRequest(
@@ -169,7 +178,9 @@ public sealed class RaftAppendEntriesTests
                 "node-2",
                 cluster,
                 new RaftStateStore(
-                    Path.Combine(directory, "raft-state.json")));
+                    Path.Combine(directory, "raft-state.json")),
+                new RaftLogStore(
+                    Path.Combine(directory, "raft-log.json")));
 
             static RaftLogEntry Entry(long index, long term) =>
                 new(index, term,
@@ -262,6 +273,126 @@ public sealed class RaftAppendEntriesTests
         }
     }
 
+
+    [Fact]
+    public async Task AppendEntries_ShouldPersistReplicatedEntriesBeforeSuccess()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(),
+            "aegisdb-tests",
+            Guid.NewGuid().ToString("N"));
+
+        Directory.CreateDirectory(directory);
+
+        try
+        {
+            var cluster = new RaftClusterConfiguration(
+                ["node-1", "node-2", "node-3"]);
+
+            string statePath = Path.Combine(directory, "raft-state.json");
+            string logPath = Path.Combine(directory, "raft-log.json");
+
+            var node = await RaftNode.CreateAsync(
+                "node-2",
+                cluster,
+                new RaftStateStore(statePath),
+                new RaftLogStore(logPath));
+
+            var entry = new RaftLogEntry(
+                Index: 1,
+                Term: 1,
+                Command: new WalRecord(
+                    WalOperation.Put,
+                    "user:1",
+                    "Alice"u8.ToArray()));
+
+            var response = await node.HandleAppendEntriesAsync(
+                new AppendEntriesRequest(
+                    Term: 1,
+                    LeaderId: "node-1",
+                    PrevLogIndex: 0,
+                    PrevLogTerm: 0,
+                    Entries: [entry],
+                    LeaderCommit: 0));
+
+            Assert.True(response.Success);
+
+            // Recreate the node from its persisted state.
+            var restarted = await RaftNode.CreateAsync(
+                "node-2",
+                cluster,
+                new RaftStateStore(statePath),
+                new RaftLogStore(logPath));
+
+            Assert.Equal(1, restarted.LastLogIndex);
+            Assert.Equal(1, restarted.LastLogTerm);
+
+            Assert.Equal(
+                "Alice",
+                System.Text.Encoding.UTF8.GetString(
+                    restarted.Log.GetEntry(1)!.Command.Value!));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+
+    [Fact]
+    public async Task AppendEntries_ShouldAdvanceCommitIndex()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(),
+            "aegisdb-tests",
+            Guid.NewGuid().ToString("N"));
+
+        Directory.CreateDirectory(directory);
+
+        try
+        {
+            var cluster = new RaftClusterConfiguration(
+                ["node-1", "node-2", "node-3"]);
+
+            var node = await RaftNode.CreateAsync(
+                "node-2",
+                cluster,
+                new RaftStateStore(
+                    Path.Combine(directory, "raft-state.json")),
+                new RaftLogStore(
+                    Path.Combine(directory, "raft-log.json")));
+
+            var entries = Enumerable.Range(1, 3)
+                .Select(index => new RaftLogEntry(
+                    Index: index,
+                    Term: 1,
+                    Command: new WalRecord(
+                        WalOperation.Put,
+                        $"key-{index}",
+                        [1, 2, 3])))
+                .ToArray();
+
+            var response = await node.HandleAppendEntriesAsync(
+                new AppendEntriesRequest(
+                    Term: 1,
+                    LeaderId: "node-1",
+                    PrevLogIndex: 0,
+                    PrevLogTerm: 0,
+                    Entries: entries,
+                    LeaderCommit: 2));
+
+            Assert.True(response.Success);
+            Assert.Equal(3, node.LastLogIndex);
+            Assert.Equal(2, node.CommitIndex);
+
+            // Committing does not automatically apply commands yet.
+            Assert.Equal(0, node.LastApplied);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
 
 
 }

@@ -652,11 +652,45 @@ public sealed class RaftNode
                 return new AppendEntriesResponse(CurrentTerm, false);
             }
 
-            // Reconcile the incoming entries with the local log.
-            Log.AppendEntries(request.Entries);
+
+
+            // Persist incoming entries before acknowledging replication.
+            if (request.Entries.Count > 0)
+            {
+                if (_logStore is null)
+                {
+                    throw new InvalidOperationException(
+                        "Persistent Raft log store is not configured.");
+                }
+
+                var updatedLog = new RaftLog();
+                updatedLog.ReplaceAll(Log.CreateSnapshot());
+                updatedLog.AppendEntries(request.Entries);
+
+                var updatedEntries = updatedLog.CreateSnapshot();
+
+                await _logStore.SaveAsync(updatedEntries, cancellationToken);
+
+                Log.ReplaceAll(updatedEntries);
+            }
+
+            // The last index covered by this AppendEntries request.
+            // For a heartbeat, this equals PrevLogIndex.
+            long lastNewEntryIndex = request.PrevLogIndex +
+                                     request.Entries.Count;
+
+            // A follower cannot commit entries beyond those confirmed
+            // by the successfully processed AppendEntries request.
+            long newCommitIndex = Math.Min(
+                request.LeaderCommit,
+                lastNewEntryIndex);
+
+            if (newCommitIndex > CommitIndex)
+            {
+                CommitIndex = newCommitIndex;
+            }
 
             return new AppendEntriesResponse(CurrentTerm, true);
-
         }
         finally
         {
