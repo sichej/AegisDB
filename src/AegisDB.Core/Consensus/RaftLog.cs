@@ -258,5 +258,67 @@ public sealed class RaftLog
     }
 
 
+    /// <summary>
+    /// Returns a defensive snapshot of the current log entries.
+    ///
+    /// Command values are copied to prevent external mutations
+    /// from affecting the snapshot.
+    /// </summary>
+    public IReadOnlyList<RaftLogEntry> CreateSnapshot()
+    {
+        lock (_lock)
+        {
+            return _entries
+                .Select(entry => entry with
+                {
+                    Command = entry.Command with
+                    {
+                        Value = entry.Command.Value?.ToArray()
+                    }
+                })
+                .ToArray();
+        }
+    }
+
+    /// <summary>
+    /// Replaces the complete in-memory log with a validated snapshot.
+    ///
+    /// Intended for publishing an already persisted Raft log image.
+    /// </summary>
+    public void ReplaceAll(IReadOnlyList<RaftLogEntry> entries)
+    {
+        ArgumentNullException.ThrowIfNull(entries);
+
+        var replacement = new List<RaftLogEntry>(entries.Count);
+
+        for (int i = 0; i < entries.Count; i++)
+        {
+            RaftLogEntry entry = entries[i];
+
+            ArgumentNullException.ThrowIfNull(entry);
+
+            if (entry.Index != i + 1L || entry.Term < 0 ||
+                entry.Command is null)
+            {
+                throw new ArgumentException(
+                    "Invalid Raft log sequence.",
+                    nameof(entries));
+            }
+
+            replacement.Add(entry with
+            {
+                Command = entry.Command with
+                {
+                    Value = entry.Command.Value?.ToArray()
+                }
+            });
+        }
+
+        lock (_lock)
+        {
+            _entries = replacement;
+        }
+    }
+
 
 }

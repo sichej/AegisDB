@@ -81,12 +81,15 @@ public sealed class RaftNode
 
     private readonly IRaftStateMachine _stateMachine;
 
+    private readonly RaftLogStore? _logStore;
+
 
     public RaftNode(
         string nodeId,
         RaftClusterConfiguration cluster,
         RaftStateStore? stateStore = null,
-        IRaftStateMachine? stateMachine = null)
+        IRaftStateMachine? stateMachine = null,
+        RaftLogStore? logStore = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(nodeId);
         ArgumentNullException.ThrowIfNull(cluster);
@@ -101,6 +104,7 @@ public sealed class RaftNode
         NodeId = nodeId;
         Cluster = cluster;
         _stateStore = stateStore;
+        _logStore = logStore;
 
         Log = new RaftLog();
 
@@ -288,27 +292,40 @@ public sealed class RaftNode
     }
 
 
+
     /// <summary>
-    /// Creates a Raft node by restoring its persistent election state.
+    /// Restores a Raft node's persistent election state and replicated log.
     ///
-    /// A restarted node always begins as a Follower, while its
-    /// current term and previous vote are recovered from disk.
+    /// A restarted node always begins as a Follower.
     /// </summary>
     public static async Task<RaftNode> CreateAsync(
         string nodeId,
         RaftClusterConfiguration cluster,
         RaftStateStore stateStore,
+        RaftLogStore? logStore = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(stateStore);
 
         var persistedState = await stateStore.LoadAsync(cancellationToken);
 
-        var node = new RaftNode(nodeId, cluster, stateStore)
+        IReadOnlyList<RaftLogEntry> persistedEntries = logStore is null
+            ? []
+            : await logStore.LoadAsync(cancellationToken);
+
+        var node = new RaftNode(
+            nodeId,
+            cluster,
+            stateStore: stateStore,
+            logStore: logStore);
+
+        foreach (RaftLogEntry entry in persistedEntries)
         {
-            CurrentTerm = persistedState.CurrentTerm,
-            VotedFor = persistedState.VotedFor
-        };
+            node.Log.Append(entry);
+        }
+
+        node.CurrentTerm = persistedState.CurrentTerm;
+        node.VotedFor = persistedState.VotedFor;
 
         return node;
     }
@@ -635,11 +652,45 @@ public sealed class RaftNode
                 return new AppendEntriesResponse(CurrentTerm, false);
             }
 
-            // Reconcile the incoming entries with the local log.
-            Log.AppendEntries(request.Entries);
+
+
+            // Persist incoming entries before acknowledging replication.
+            if (request.Entries.Count > 0)
+            {
+                if (_logStore is null)
+                {
+                    throw new InvalidOperationException(
+                        "Persistent Raft log store is not configured.");
+                }
+
+                var updatedLog = new RaftLog();
+                updatedLog.ReplaceAll(Log.CreateSnapshot());
+                updatedLog.AppendEntries(request.Entries);
+
+                var updatedEntries = updatedLog.CreateSnapshot();
+
+                await _logStore.SaveAsync(updatedEntries, cancellationToken);
+
+                Log.ReplaceAll(updatedEntries);
+            }
+
+            // The last index covered by this AppendEntries request.
+            // For a heartbeat, this equals PrevLogIndex.
+            long lastNewEntryIndex = request.PrevLogIndex +
+                                     request.Entries.Count;
+
+            // A follower cannot commit entries beyond those confirmed
+            // by the successfully processed AppendEntries request.
+            long newCommitIndex = Math.Min(
+                request.LeaderCommit,
+                lastNewEntryIndex);
+
+            if (newCommitIndex > CommitIndex)
+            {
+                CommitIndex = newCommitIndex;
+            }
 
             return new AppendEntriesResponse(CurrentTerm, true);
-
         }
         finally
         {
