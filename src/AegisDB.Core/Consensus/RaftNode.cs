@@ -561,7 +561,7 @@ public sealed class RaftNode
 
             // A granted vote resets the election timer.
             _electionTimer?.Reset();
-            
+
             return new RequestVoteResponse(CurrentTerm, true);
         }
         finally
@@ -838,7 +838,7 @@ public sealed class RaftNode
         }
     }
 
-  
+
     /// <summary>
     /// Processes a vote response while holding the Raft state lock.
     ///
