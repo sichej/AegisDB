@@ -85,13 +85,16 @@ public sealed class RaftNode
 
     private readonly RaftLogStore? _logStore;
 
+    private readonly RaftElectionTimer? _electionTimer;
+
 
     public RaftNode(
         string nodeId,
         RaftClusterConfiguration cluster,
         RaftStateStore? stateStore = null,
         IRaftStateMachine? stateMachine = null,
-        RaftLogStore? logStore = null)
+        RaftLogStore? logStore = null,
+        RaftElectionTimer? electionTimer = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(nodeId);
         ArgumentNullException.ThrowIfNull(cluster);
@@ -107,6 +110,7 @@ public sealed class RaftNode
         Cluster = cluster;
         _stateStore = stateStore;
         _logStore = logStore;
+        _electionTimer = electionTimer;
 
         _log = new RaftLog();
 
@@ -321,7 +325,8 @@ public sealed class RaftNode
         RaftClusterConfiguration cluster,
         RaftStateStore stateStore,
         RaftLogStore? logStore = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        RaftElectionTimer? electionTimer = null)
     {
         ArgumentNullException.ThrowIfNull(stateStore);
 
@@ -335,7 +340,8 @@ public sealed class RaftNode
             nodeId,
             cluster,
             stateStore: stateStore,
-            logStore: logStore);
+            logStore: logStore,
+            electionTimer: electionTimer);
 
         foreach (RaftLogEntry entry in persistedEntries)
         {
@@ -553,6 +559,9 @@ public sealed class RaftNode
                 VotedFor = request.CandidateId;
             }
 
+            // A granted vote resets the election timer.
+            _electionTimer?.Reset();
+
             return new RequestVoteResponse(CurrentTerm, true);
         }
         finally
@@ -628,6 +637,10 @@ public sealed class RaftNode
             // An accepted leader message establishes the Follower role.
             State = RaftNodeState.Follower;
             _votesReceived.Clear();
+
+            // A valid leader message prevents a new election,
+            // even if the subsequent log consistency check fails.
+            _electionTimer?.Reset();
 
 
             // The follower must contain the entry preceding the batch.
@@ -824,4 +837,96 @@ public sealed class RaftNode
             _stateLock.Release();
         }
     }
+
+
+    /// <summary>
+    /// Processes a vote response while holding the Raft state lock.
+    ///
+    /// Only votes from configured peers in the current election
+    /// are counted. A higher term causes the node to step down.
+    /// </summary>
+    public async Task<bool> ReceiveVoteAsync(
+        string voterId,
+        long term,
+        bool voteGranted,
+        long electionTerm,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(voterId);
+
+        await _stateLock.WaitAsync(cancellationToken);
+
+        try
+        {
+            if (!Cluster.Contains(voterId) || voterId == NodeId)
+                return false;
+
+            if (term > CurrentTerm)
+            {
+                if (_stateStore is not null)
+                {
+                    await _stateStore.SaveAsync(
+                        new RaftPersistentState(term, null),
+                        cancellationToken);
+                }
+
+                CurrentTerm = term;
+                VotedFor = null;
+                State = RaftNodeState.Follower;
+                _votesReceived.Clear();
+
+                return false;
+            }
+
+            // Ignore responses from previous elections.
+            if (State != RaftNodeState.Candidate ||
+                CurrentTerm != electionTerm ||
+                term != electionTerm ||
+                !voteGranted)
+            {
+                return false;
+            }
+
+            _votesReceived.Add(voterId);
+
+            if (_votesReceived.Count >= Cluster.QuorumSize)
+            {
+                State = RaftNodeState.Leader;
+                return true;
+            }
+
+            return false;
+        }
+        finally
+        {
+            _stateLock.Release();
+        }
+    }
+
+
+    /// <summary>
+    /// Elects the local candidate when it is the only voting member.
+    /// </summary>
+    public async Task ReceiveSingleNodeMajorityAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await _stateLock.WaitAsync(cancellationToken);
+
+        try
+        {
+            if (Cluster.QuorumSize != 1 ||
+                State != RaftNodeState.Candidate)
+            {
+                throw new InvalidOperationException(
+                    "Single-node majority is not applicable.");
+            }
+
+            State = RaftNodeState.Leader;
+        }
+        finally
+        {
+            _stateLock.Release();
+        }
+    }
+
 }
