@@ -15,14 +15,11 @@ public sealed class RaftStateMachineIntegrationTests
 
         var stateMachine = new RecordingRaftStateMachine();
 
-        var node = new RaftNode(
-            "node-1",
-            cluster,
-            stateMachine: stateMachine);
+        var entries = new List<RaftLogEntry>();
 
         for (long index = 1; index <= 5; index++)
         {
-            node.Log.Append(new RaftLogEntry(
+            entries.Add(new RaftLogEntry(
                 Index: index,
                 Term: 1,
                 Command: new WalRecord(
@@ -30,6 +27,12 @@ public sealed class RaftStateMachineIntegrationTests
                     $"key-{index}",
                     [1, 2, 3])));
         }
+
+        var node = new RaftNode(
+            "node-1",
+            cluster,
+            initialEntries: entries,
+            stateMachine: stateMachine);
 
         // Only the first three entries are committed.
         await node.AdvanceCommitIndexAsync(3);

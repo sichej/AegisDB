@@ -10,7 +10,7 @@ namespace AegisDB.Core.Consensus;
 /// This implementation is currently in-memory and does not
 /// support log truncation or snapshot compaction.
 /// </summary>
-public sealed class RaftLog
+public sealed class RaftLog : IRaftLogReader
 {
     private List<RaftLogEntry> _entries = new();
     private readonly object _lock = new();
@@ -65,7 +65,7 @@ public sealed class RaftLog
                     "Raft term cannot be negative.");
             }
 
-            _entries.Add(entry);
+            _entries.Add(CloneEntry(entry));
         }
     }
 
@@ -80,9 +80,19 @@ public sealed class RaftLog
             if (index < 1 || index > _entries.Count)
                 return null;
 
-            return _entries[checked((int)(index - 1))];
+            RaftLogEntry entry = _entries[checked((int)(index - 1))];
+
+            // Return a defensive copy of mutable command data.
+            return entry with
+            {
+                Command = entry.Command with
+                {
+                    Value = entry.Command.Value?.ToArray()
+                }
+            };
         }
     }
+
 
     /// <summary>
     /// Checks whether the local log contains an entry
@@ -156,7 +166,9 @@ public sealed class RaftLog
 
             // Snapshot the incoming collection to prevent external
             // changes to its structure during reconciliation.
-            RaftLogEntry[] incoming = entries.ToArray();
+            RaftLogEntry[] incoming = entries
+                .Select(entry => CloneEntry(entry))
+                .ToArray();
 
             // Validate the entire sequence before changing the log.
             for (int i = 0; i < incoming.Length; i++)
@@ -318,6 +330,20 @@ public sealed class RaftLog
         {
             _entries = replacement;
         }
+    }
+
+    /// <summary>
+    /// Creates an independent copy of an entry and its mutable command data.
+    /// </summary>
+    private static RaftLogEntry CloneEntry(RaftLogEntry entry)
+    {
+        return entry with
+        {
+            Command = entry.Command with
+            {
+                Value = entry.Command.Value?.ToArray()
+            }
+        };
     }
 
 
