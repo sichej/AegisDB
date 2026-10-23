@@ -39,12 +39,16 @@ public sealed class RaftNodeRuntime
     /// <summary>
     /// Runs the node until shutdown is requested.
     /// </summary>
+
     public async Task RunAsync(
         CancellationToken cancellationToken = default)
     {
         while (!cancellationToken.IsCancellationRequested)
         {
-            if (_node.State == RaftNodeState.Leader)
+            RaftNodeStateSnapshot snapshot =
+                await _node.GetStateSnapshotAsync(cancellationToken);
+
+            if (snapshot.State == RaftNodeState.Leader)
             {
                 await RunLeaderModeAsync(cancellationToken);
             }
@@ -54,6 +58,7 @@ public sealed class RaftNodeRuntime
             }
         }
     }
+
 
     private async Task RunElectionModeAsync(
         CancellationToken cancellationToken)

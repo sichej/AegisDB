@@ -98,7 +98,13 @@ public sealed class WriteAheadLog
 
             // Reject invalid sizes before allocating memory.
             const int minPayloadLength = 13; // operation + lengths + checksum
-            const int maxRecordLength = 16 * 1024 * 1024;
+            const int maxRecordLength = WalLimits.MaxRecordPayloadBytes;
+
+            if (recordLength > WalLimits.MaxRecordPayloadBytes)
+            {
+                throw new InvalidDataException(
+                    "WAL record exceeds the maximum supported size.");
+            }
 
             if (recordLength < minPayloadLength ||
                 recordLength > maxRecordLength)
@@ -152,7 +158,7 @@ public sealed class WriteAheadLog
         long lastValidOffset = 0;
 
         const int minRecordLength = 13;
-        const int maxRecordLength = 16 * 1024 * 1024;
+        const int maxRecordLength = WalLimits.MaxRecordPayloadBytes;
 
         while (stream.Position < stream.Length)
         {
@@ -304,7 +310,7 @@ public sealed class WriteAheadLog
         );
 
         const int minRecordLength = 13;
-        const int maxRecordLength = 16 * 1024 * 1024;
+        const int maxRecordLength = WalLimits.MaxRecordPayloadBytes;
 
         while (stream.Position < stream.Length)
         {

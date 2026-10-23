@@ -17,6 +17,23 @@ public static class WalSerializer
         using var stream = new MemoryStream();
         using var writer = new BinaryWriter(stream);
 
+
+        long valueLength = record.Value?.LongLength ?? 0;
+
+        long payloadLength =
+            WalLimits.RecordOverheadBytes +
+            keyBytes.LongLength +
+            valueLength;
+
+        if (payloadLength > WalLimits.MaxRecordPayloadBytes)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(record),
+                $"WAL record payload exceeds the maximum of " +
+                $"{WalLimits.MaxRecordPayloadBytes} bytes.");
+        }
+
+
         // Reserve space for the record length.
         writer.Write(0);
 

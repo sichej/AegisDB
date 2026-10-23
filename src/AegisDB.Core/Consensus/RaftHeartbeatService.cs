@@ -16,12 +16,14 @@ public sealed class RaftHeartbeatService
     private readonly IRaftTransport _transport;
     private readonly IReadOnlyList<string> _peers;
     private readonly TimeSpan _heartbeatInterval;
+    private readonly TimeSpan _rpcTimeout;
 
     public RaftHeartbeatService(
         RaftNode node,
         IRaftTransport transport,
         IEnumerable<string> peers,
-        TimeSpan heartbeatInterval)
+        TimeSpan heartbeatInterval,
+        TimeSpan? rpcTimeout = null)
     {
         _node = node ?? throw new ArgumentNullException(nameof(node));
         _transport = transport ?? throw new ArgumentNullException(nameof(transport));
@@ -43,6 +45,13 @@ public sealed class RaftHeartbeatService
             throw new ArgumentException(
                 "Peers must contain every other cluster member exactly once.",
                 nameof(peers));
+        }
+
+        _rpcTimeout = rpcTimeout ?? TimeSpan.FromMilliseconds(250);
+
+        if (_rpcTimeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(rpcTimeout));
         }
 
         _heartbeatInterval = heartbeatInterval;
@@ -69,49 +78,69 @@ public sealed class RaftHeartbeatService
         }
     }
 
+
     private async Task SendHeartbeatsAsync(
         CancellationToken cancellationToken)
     {
-        long term = _node.CurrentTerm;
+        RaftNodeStateSnapshot snapshot =
+            await _node.GetStateSnapshotAsync(cancellationToken);
+
+        if (snapshot.State != RaftNodeState.Leader)
+            return;
 
         var request = new AppendEntriesRequest(
-            Term: term,
-            LeaderId: _node.NodeId,
-            PrevLogIndex: _node.LastLogIndex,
-            PrevLogTerm: _node.LastLogTerm,
+            Term: snapshot.CurrentTerm,
+            LeaderId: snapshot.NodeId,
+            PrevLogIndex: snapshot.LastLogIndex,
+            PrevLogTerm: snapshot.LastLogTerm,
             Entries: [],
-            LeaderCommit: _node.CommitIndex);
+            LeaderCommit: snapshot.CommitIndex);
 
-        var requests = _peers.Select(async peerId =>
+
+        async Task SendToPeerAsync(string peerId)
         {
-            try
-            {
-                var response = await _transport.AppendEntriesAsync(
-                    peerId,
-                    request,
+            using var rpcCts =
+                CancellationTokenSource.CreateLinkedTokenSource(
                     cancellationToken);
 
-                // Even a rejected heartbeat can reveal a newer term.
-                if (response.Term > term)
-                {
-                    await _node.BecomeFollowerAsync(
-                        response.Term,
-                        cancellationToken);
-                }
+            rpcCts.CancelAfter(_rpcTimeout);
+
+            AppendEntriesResponse response;
+
+            try
+            {
+                response = await _transport.AppendEntriesAsync(
+                    peerId,
+                    request,
+                    rpcCts.Token);
             }
             catch (OperationCanceledException)
                 when (cancellationToken.IsCancellationRequested)
             {
                 throw;
             }
-            catch (Exception)
+            catch (OperationCanceledException)
+                when (rpcCts.IsCancellationRequested)
             {
-                // An unreachable follower must not prevent
-                // communication with the remaining peers.
-                // Production code should log this failure.
+                // The individual RPC timed out.
+                return;
             }
-        });
+            catch (Exception ex)
+                when (ex is not OperationCanceledException)
+            {
+                // Transport failure: the peer is unavailable.
+                // Add structured logging when integrating the server.
+                return;
+            }
 
-        await Task.WhenAll(requests);
+            // A persistence failure here must propagate to the runtime.
+            await _node.StepDownIfHigherTermAsync(
+                response.Term,
+                cancellationToken);
+        }
+
+
+        await Task.WhenAll(_peers.Select(SendToPeerAsync));
     }
+
 }

@@ -87,6 +87,8 @@ public sealed class RaftNode
 
     private readonly RaftElectionTimer? _electionTimer;
 
+    private int _electionInProgress;
+
 
     public RaftNode(
         string nodeId,
@@ -140,6 +142,27 @@ public sealed class RaftNode
         : this(nodeId, cluster, stateMachine: stateMachine)
     {
         _log.ReplaceAll(initialEntries);
+    }
+
+
+    /// <summary>
+    /// Allows only one election coordinator to operate on this node
+    /// at a time, even when multiple coordinator instances exist.
+    /// </summary>
+    internal bool TryBeginElection()
+    {
+        return Interlocked.CompareExchange(
+            ref _electionInProgress,
+            1,
+            0) == 0;
+    }
+
+    /// <summary>
+    /// Releases the election guard after the coordinator completes.
+    /// </summary>
+    internal void EndElection()
+    {
+        Interlocked.Exchange(ref _electionInProgress, 0);
     }
 
 
@@ -969,6 +992,76 @@ public sealed class RaftNode
 
             _votesReceived.Clear();
             _votesReceived.Add(NodeId);
+
+            return true;
+        }
+        finally
+        {
+            _stateLock.Release();
+        }
+    }
+
+
+    /// <summary>
+    /// Returns a consistent snapshot of the node's consensus state.
+    ///
+    /// Acquires the state lock to prevent observing partially
+    /// completed state transitions.
+    /// </summary>
+    public async Task<RaftNodeStateSnapshot> GetStateSnapshotAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await _stateLock.WaitAsync(cancellationToken);
+
+        try
+        {
+            return new RaftNodeStateSnapshot(
+                NodeId: NodeId,
+                State: State,
+                CurrentTerm: CurrentTerm,
+                VotedFor: VotedFor,
+                CommitIndex: CommitIndex,
+                LastApplied: LastApplied,
+                LastLogIndex: _log.LastIndex,
+                LastLogTerm: _log.LastTerm);
+        }
+        finally
+        {
+            _stateLock.Release();
+        }
+    }
+
+
+    /// <summary>
+    /// Steps down only when a response reveals a term strictly
+    /// greater than the node's current term.
+    ///
+    /// The comparison and transition use the same state lock,
+    /// preventing delayed RPC responses from demoting a newer leader.
+    /// </summary>
+    public async Task<bool> StepDownIfHigherTermAsync(
+        long observedTerm,
+        CancellationToken cancellationToken = default)
+    {
+        await _stateLock.WaitAsync(cancellationToken);
+
+        try
+        {
+            if (observedTerm <= CurrentTerm)
+                return false;
+
+            // Persist the new term before publishing the transition.
+            if (_stateStore is not null)
+            {
+                await _stateStore.SaveAsync(
+                    new RaftPersistentState(observedTerm, null),
+                    cancellationToken);
+            }
+
+            CurrentTerm = observedTerm;
+            VotedFor = null;
+            State = RaftNodeState.Follower;
+            _votesReceived.Clear();
 
             return true;
         }

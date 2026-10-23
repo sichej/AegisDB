@@ -27,15 +27,20 @@ public sealed class RaftElectionService
     /// <summary>
     /// Runs the election loop until cancellation is requested.
     /// </summary>
+
     public async Task RunAsync(
         CancellationToken cancellationToken = default)
     {
         while (!cancellationToken.IsCancellationRequested)
         {
-            // A leader does not need to start new elections.
-            if (_node.State == RaftNodeState.Leader)
+            RaftNodeStateSnapshot snapshot =
+                await _node.GetStateSnapshotAsync(cancellationToken);
+
+            if (snapshot.State == RaftNodeState.Leader)
                 return;
 
+            // Capture the timer generation before waiting.
+            // Any valid heartbeat or granted vote can invalidate it.
             long generation = _timer.Generation;
 
             bool timedOut = await _timer.WaitForTimeoutAsync(
@@ -44,29 +49,15 @@ public sealed class RaftElectionService
             if (!timedOut)
                 continue;
 
-            if (_node.State == RaftNodeState.Leader)
-                return;
-
+            // The coordinator checks the timer generation and starts
+            // the election atomically with the node state transition.
             await _coordinator.RunElectionAsync(
                 cancellationToken,
                 expectedTimerGeneration: generation);
 
-            if (!timedOut)
-                continue;
-
-            // The node may have become leader while waiting.
-            if (_node.State == RaftNodeState.Leader)
-                return;
-
-            try
-            {
-                await _coordinator.RunElectionAsync(cancellationToken);
-            }
-            catch (OperationCanceledException)
-                when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
+            // Regardless of the election outcome, wait for a new
+            // randomized timeout before attempting another election.
         }
     }
+
 }
