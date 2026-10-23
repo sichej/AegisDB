@@ -54,9 +54,22 @@ public sealed class RaftElectionCoordinator
     /// </summary>
 
     public async Task<bool> RunElectionAsync(
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        long? expectedTimerGeneration = null)
     {
-        await _node.StartElectionAsync(cancellationToken);
+        if (expectedTimerGeneration is long generation)
+        {
+            bool started = await _node.TryStartElectionAsync(
+                generation,
+                cancellationToken);
+
+            if (!started)
+                return false;
+        }
+        else
+        {
+            await _node.StartElectionAsync(cancellationToken);
+        }
 
         long electionTerm = _node.CurrentTerm;
 

@@ -15,6 +15,8 @@ public sealed class RaftElectionTimer
 
     private CancellationTokenSource _resetSignal = new();
 
+    private long _generation;
+
     public RaftElectionTimer(
         TimeSpan minimumTimeout,
         TimeSpan maximumTimeout)
@@ -30,6 +32,17 @@ public sealed class RaftElectionTimer
         _maximumTimeout = maximumTimeout;
     }
 
+    public long Generation
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _generation;
+            }
+        }
+    }
+
     /// <summary>
     /// Resets the election deadline by cancelling the current wait.
     /// </summary>
@@ -37,13 +50,12 @@ public sealed class RaftElectionTimer
     {
         lock (_lock)
         {
+            _generation++;
+
             var previous = _resetSignal;
             _resetSignal = new CancellationTokenSource();
 
             previous.Cancel();
-
-            // Do not dispose the previous source here: a pending
-            // waiter may still be using its token.
         }
     }
 

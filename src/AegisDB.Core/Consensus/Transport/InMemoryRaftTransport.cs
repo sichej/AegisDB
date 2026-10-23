@@ -61,4 +61,14 @@ public sealed class InMemoryRaftTransport : IRaftTransport
 
         return node;
     }
+
+    /// <summary>
+    /// Removes a node from the transport, simulating an unavailable peer.
+    /// </summary>
+    public bool Unregister(string nodeId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(nodeId);
+
+        return _nodes.TryRemove(nodeId, out _);
+    }
 }
