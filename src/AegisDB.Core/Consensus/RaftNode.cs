@@ -339,9 +339,11 @@ public sealed class RaftNode
 
 
     /// <summary>
-    /// Restores a Raft node's persistent election state and replicated log.
+    /// Creates a Raft node and restores its persisted term, vote,
+    /// and log entries.
     ///
-    /// A restarted node always begins as a Follower.
+    /// The node always restarts as a Follower. Committed entries
+    /// are not automatically applied during construction.
     /// </summary>
     public static async Task<RaftNode> CreateAsync(
         string nodeId,
@@ -349,30 +351,41 @@ public sealed class RaftNode
         RaftStateStore stateStore,
         RaftLogStore? logStore = null,
         CancellationToken cancellationToken = default,
-        RaftElectionTimer? electionTimer = null)
+        RaftElectionTimer? electionTimer = null,
+        IRaftStateMachine? stateMachine = null)
     {
         ArgumentNullException.ThrowIfNull(stateStore);
 
+        // Load the persistent election state.
         var persistedState = await stateStore.LoadAsync(cancellationToken);
 
+        // Restore the persisted Raft log, if configured.
         IReadOnlyList<RaftLogEntry> persistedEntries = logStore is null
             ? []
             : await logStore.LoadAsync(cancellationToken);
 
+        // Inject the provided state machine or use the default one
+        // configured by the RaftNode constructor.
         var node = new RaftNode(
             nodeId,
             cluster,
             stateStore: stateStore,
             logStore: logStore,
-            electionTimer: electionTimer);
+            electionTimer: electionTimer,
+            stateMachine: stateMachine);
 
+        // Reconstruct the in-memory log from the persisted entries.
         foreach (RaftLogEntry entry in persistedEntries)
         {
             node._log.Append(entry);
         }
 
+        // Restore the persistent term and vote.
         node.CurrentTerm = persistedState.CurrentTerm;
         node.VotedFor = persistedState.VotedFor;
+
+        // Raft nodes restart as Followers, never as Leaders.
+        node.State = RaftNodeState.Follower;
 
         return node;
     }
