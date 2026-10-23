@@ -1131,4 +1131,72 @@ public sealed class RaftNode
         }
     }
 
+
+    /// <summary>
+    /// Appends a client command to the leader's persistent Raft log.
+    ///
+    /// The command is durable locally before becoming visible in
+    /// the in-memory log. It is not committed by this operation.
+    /// </summary>
+    public async Task<RaftLogEntry> AppendLeaderCommandAsync(
+        WalRecord command,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+
+        // Take ownership of the caller's buffer before awaiting.
+        var ownedCommand = new WalRecord(
+            command.Operation,
+            command.Key,
+            command.Value?.ToArray());
+
+        await _stateLock.WaitAsync(cancellationToken);
+
+        try
+        {
+            if (State != RaftNodeState.Leader)
+            {
+                throw new InvalidOperationException(
+                    "Only the current Raft leader can append client commands.");
+            }
+
+            if (_logStore is null)
+            {
+                throw new InvalidOperationException(
+                    "Persistent Raft log storage is not configured.");
+            }
+
+            long nextIndex = checked(_log.LastIndex + 1);
+
+            var entry = new RaftLogEntry(
+                Index: nextIndex,
+                Term: CurrentTerm,
+                Command: ownedCommand);
+
+            // Build the new log without modifying the published log.
+            var updatedLog = new RaftLog();
+
+            updatedLog.ReplaceAll(_log.CreateSnapshot());
+            updatedLog.Append(entry);
+
+            IReadOnlyList<RaftLogEntry> updatedEntries =
+                updatedLog.CreateSnapshot();
+
+            // Persist before publishing the new entry.
+            await _logStore.SaveAsync(
+                updatedEntries,
+                cancellationToken);
+
+            // Persistence succeeded. Publish atomically in memory.
+            _log.ReplaceAll(updatedEntries);
+
+            return entry;
+        }
+        finally
+        {
+            _stateLock.Release();
+        }
+    }
+
+
 }
