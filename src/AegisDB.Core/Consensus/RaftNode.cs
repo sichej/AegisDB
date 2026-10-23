@@ -929,4 +929,54 @@ public sealed class RaftNode
         }
     }
 
+
+    /// <summary>
+    /// Starts an election only if no heartbeat or granted vote
+    /// has reset the election timer since the observed generation.
+    ///
+    /// The generation check and state transition are coordinated
+    /// with the Raft node's state lock.
+    /// </summary>
+    public async Task<bool> TryStartElectionAsync(
+        long expectedGeneration,
+        CancellationToken cancellationToken = default)
+    {
+        if (_stateStore is null || _electionTimer is null)
+        {
+            throw new InvalidOperationException(
+                "Persistent state and election timer are required.");
+        }
+
+        await _stateLock.WaitAsync(cancellationToken);
+
+        try
+        {
+            if (State == RaftNodeState.Leader ||
+                _electionTimer.Generation != expectedGeneration)
+            {
+                return false;
+            }
+
+            long nextTerm = checked(CurrentTerm + 1);
+
+            await _stateStore.SaveAsync(
+                new RaftPersistentState(nextTerm, NodeId),
+                cancellationToken);
+
+            CurrentTerm = nextTerm;
+            VotedFor = NodeId;
+            State = RaftNodeState.Candidate;
+
+            _votesReceived.Clear();
+            _votesReceived.Add(NodeId);
+
+            return true;
+        }
+        finally
+        {
+            _stateLock.Release();
+        }
+    }
+
+
 }
