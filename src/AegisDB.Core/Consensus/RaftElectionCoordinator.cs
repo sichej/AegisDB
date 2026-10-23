@@ -48,14 +48,38 @@ public sealed class RaftElectionCoordinator
         }
     }
 
-    /// <summary>
-    /// Starts an election and sends RequestVote RPCs to peers.
-    /// A failed RPC is treated as an unavailable peer, not a vote.
-    /// </summary>
 
     public async Task<bool> RunElectionAsync(
         CancellationToken cancellationToken = default,
         long? expectedTimerGeneration = null)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        // Do not start another election while one is already running.
+        if (!_node.TryBeginElection())
+            return false;
+
+        try
+        {
+            return await RunElectionCoreAsync(
+                cancellationToken,
+                expectedTimerGeneration);
+        }
+        finally
+        {
+            // Release the guard even if an RPC, persistence operation,
+            // or cancellation causes an exception.
+            _node.EndElection();
+        }
+    }
+
+    /// <summary>
+    /// Starts an election and sends RequestVote RPCs to peers.
+    /// A failed RPC is treated as an unavailable peer, not a vote.
+    /// </summary>
+    private async Task<bool> RunElectionCoreAsync(
+        CancellationToken cancellationToken,
+        long? expectedTimerGeneration)
     {
         if (expectedTimerGeneration is long generation)
         {

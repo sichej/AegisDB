@@ -72,15 +72,18 @@ public sealed class RaftHeartbeatService
     private async Task SendHeartbeatsAsync(
         CancellationToken cancellationToken)
     {
-        long term = _node.CurrentTerm;
+        RaftNodeStateSnapshot snapshot = await _node.GetStateSnapshotAsync(cancellationToken);
+
+        if (snapshot.State != RaftNodeState.Leader)
+            return;
 
         var request = new AppendEntriesRequest(
-            Term: term,
-            LeaderId: _node.NodeId,
-            PrevLogIndex: _node.LastLogIndex,
-            PrevLogTerm: _node.LastLogTerm,
+            Term: snapshot.CurrentTerm,
+            LeaderId: snapshot.NodeId,
+            PrevLogIndex: snapshot.LastLogIndex,
+            PrevLogTerm: snapshot.LastLogTerm,
             Entries: [],
-            LeaderCommit: _node.CommitIndex);
+            LeaderCommit: snapshot.CommitIndex);
 
         var requests = _peers.Select(async peerId =>
         {
@@ -92,7 +95,7 @@ public sealed class RaftHeartbeatService
                     cancellationToken);
 
                 // Even a rejected heartbeat can reveal a newer term.
-                if (response.Term > term)
+                if (response.Term > snapshot.CurrentTerm)
                 {
                     await _node.BecomeFollowerAsync(
                         response.Term,
