@@ -339,9 +339,11 @@ public sealed class RaftNode
 
 
     /// <summary>
-    /// Restores a Raft node's persistent election state and replicated log.
+    /// Creates a Raft node and restores its persisted term, vote,
+    /// and log entries.
     ///
-    /// A restarted node always begins as a Follower.
+    /// The node always restarts as a Follower. Committed entries
+    /// are not automatically applied during construction.
     /// </summary>
     public static async Task<RaftNode> CreateAsync(
         string nodeId,
@@ -349,30 +351,41 @@ public sealed class RaftNode
         RaftStateStore stateStore,
         RaftLogStore? logStore = null,
         CancellationToken cancellationToken = default,
-        RaftElectionTimer? electionTimer = null)
+        RaftElectionTimer? electionTimer = null,
+        IRaftStateMachine? stateMachine = null)
     {
         ArgumentNullException.ThrowIfNull(stateStore);
 
+        // Load the persistent election state.
         var persistedState = await stateStore.LoadAsync(cancellationToken);
 
+        // Restore the persisted Raft log, if configured.
         IReadOnlyList<RaftLogEntry> persistedEntries = logStore is null
             ? []
             : await logStore.LoadAsync(cancellationToken);
 
+        // Inject the provided state machine or use the default one
+        // configured by the RaftNode constructor.
         var node = new RaftNode(
             nodeId,
             cluster,
             stateStore: stateStore,
             logStore: logStore,
-            electionTimer: electionTimer);
+            electionTimer: electionTimer,
+            stateMachine: stateMachine);
 
+        // Reconstruct the in-memory log from the persisted entries.
         foreach (RaftLogEntry entry in persistedEntries)
         {
             node._log.Append(entry);
         }
 
+        // Restore the persistent term and vote.
         node.CurrentTerm = persistedState.CurrentTerm;
         node.VotedFor = persistedState.VotedFor;
+
+        // Raft nodes restart as Followers, never as Leaders.
+        node.State = RaftNodeState.Follower;
 
         return node;
     }
@@ -1064,6 +1077,133 @@ public sealed class RaftNode
             _votesReceived.Clear();
 
             return true;
+        }
+        finally
+        {
+            _stateLock.Release();
+        }
+    }
+
+
+    /// <summary>
+    /// Advances the leader's commit index using confirmed follower
+    /// replication progress.
+    ///
+    /// Leadership, term, log and commitment are validated under
+    /// the node state lock before publishing the new commit index.
+    /// </summary>
+    public async Task<bool> TryAdvanceLeaderCommitAsync(
+        long expectedTerm,
+        IReadOnlyCollection<long> followerMatchIndexes,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(followerMatchIndexes);
+
+        await _stateLock.WaitAsync(cancellationToken);
+
+        try
+        {
+            if (State != RaftNodeState.Leader ||
+                CurrentTerm != expectedTerm)
+            {
+                return false;
+            }
+
+            if (followerMatchIndexes.Count !=
+                Cluster.ClusterSize - 1)
+            {
+                throw new ArgumentException(
+                    "Exactly one match index is required per follower.",
+                    nameof(followerMatchIndexes));
+            }
+
+            long lastIndex = _log.LastIndex;
+
+            long newCommitIndex =
+                RaftCommitCalculator.CalculateCommitIndex(
+                    currentCommitIndex: CommitIndex,
+                    currentTerm: CurrentTerm,
+                    leaderLastLogIndex: lastIndex,
+                    quorumSize: Cluster.QuorumSize,
+                    followerMatchIndexes: followerMatchIndexes,
+                    getEntryTerm: index =>
+                        _log.GetEntry(index)?.Term
+                        ?? throw new InvalidOperationException(
+                            $"Log entry {index} does not exist."));
+
+            if (newCommitIndex <= CommitIndex)
+                return false;
+
+            CommitIndex = newCommitIndex;
+
+            return true;
+        }
+        finally
+        {
+            _stateLock.Release();
+        }
+    }
+
+
+    /// <summary>
+    /// Appends a client command to the leader's persistent Raft log.
+    ///
+    /// The command is durable locally before becoming visible in
+    /// the in-memory log. It is not committed by this operation.
+    /// </summary>
+    public async Task<RaftLogEntry> AppendLeaderCommandAsync(
+        WalRecord command,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+
+        // Take ownership of the caller's buffer before awaiting.
+        var ownedCommand = new WalRecord(
+            command.Operation,
+            command.Key,
+            command.Value?.ToArray());
+
+        await _stateLock.WaitAsync(cancellationToken);
+
+        try
+        {
+            if (State != RaftNodeState.Leader)
+            {
+                throw new InvalidOperationException(
+                    "Only the current Raft leader can append client commands.");
+            }
+
+            if (_logStore is null)
+            {
+                throw new InvalidOperationException(
+                    "Persistent Raft log storage is not configured.");
+            }
+
+            long nextIndex = checked(_log.LastIndex + 1);
+
+            var entry = new RaftLogEntry(
+                Index: nextIndex,
+                Term: CurrentTerm,
+                Command: ownedCommand);
+
+            // Build the new log without modifying the published log.
+            var updatedLog = new RaftLog();
+
+            updatedLog.ReplaceAll(_log.CreateSnapshot());
+            updatedLog.Append(entry);
+
+            IReadOnlyList<RaftLogEntry> updatedEntries =
+                updatedLog.CreateSnapshot();
+
+            // Persist before publishing the new entry.
+            await _logStore.SaveAsync(
+                updatedEntries,
+                cancellationToken);
+
+            // Persistence succeeded. Publish atomically in memory.
+            _log.ReplaceAll(updatedEntries);
+
+            return entry;
         }
         finally
         {

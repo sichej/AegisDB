@@ -141,4 +141,55 @@ public sealed class RaftReplicationManager
 
         return progress.GetSnapshot();
     }
+
+
+    /// <summary>
+    /// Attempts to commit the highest current-term entry
+    /// acknowledged by a majority of cluster members.
+    /// </summary>
+    public async Task<bool> TryAdvanceCommitAsync(
+        CancellationToken cancellationToken = default)
+    {
+        long[] followerMatches = _progress.Values
+            .Select(progress => progress.GetSnapshot().MatchIndex)
+            .ToArray();
+
+        return await _leader.TryAdvanceLeaderCommitAsync(
+            expectedTerm: _leaderTerm,
+            followerMatchIndexes: followerMatches,
+            cancellationToken: cancellationToken);
+    }
+
+
+    /// <summary>
+    /// Advances the leader commit index after quorum replication
+    /// and applies all committed entries to the state machine.
+    ///
+    /// Application is attempted even when the commit index did
+    /// not advance, allowing retry after a previous apply failure.
+    /// </summary>
+    public async Task<bool> CommitAndApplyAsync(
+        CancellationToken cancellationToken = default)
+    {
+        RaftNodeStateSnapshot snapshot =
+            await _leader.GetStateSnapshotAsync(cancellationToken);
+
+        if (snapshot.State != RaftNodeState.Leader ||
+            snapshot.CurrentTerm != _leaderTerm)
+        {
+            return false;
+        }
+
+        bool committed = await TryAdvanceCommitAsync(
+            cancellationToken);
+
+        // The state machine applies entries in order.
+        // LastApplied only advances after a successful application.
+        await _leader.ApplyCommittedEntriesAsync(
+            cancellationToken);
+
+        return committed;
+    }
+
+
 }
