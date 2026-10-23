@@ -1072,4 +1072,63 @@ public sealed class RaftNode
     }
 
 
+    /// <summary>
+    /// Advances the leader's commit index using confirmed follower
+    /// replication progress.
+    ///
+    /// Leadership, term, log and commitment are validated under
+    /// the node state lock before publishing the new commit index.
+    /// </summary>
+    public async Task<bool> TryAdvanceLeaderCommitAsync(
+        long expectedTerm,
+        IReadOnlyCollection<long> followerMatchIndexes,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(followerMatchIndexes);
+
+        await _stateLock.WaitAsync(cancellationToken);
+
+        try
+        {
+            if (State != RaftNodeState.Leader ||
+                CurrentTerm != expectedTerm)
+            {
+                return false;
+            }
+
+            if (followerMatchIndexes.Count !=
+                Cluster.ClusterSize - 1)
+            {
+                throw new ArgumentException(
+                    "Exactly one match index is required per follower.",
+                    nameof(followerMatchIndexes));
+            }
+
+            long lastIndex = _log.LastIndex;
+
+            long newCommitIndex =
+                RaftCommitCalculator.CalculateCommitIndex(
+                    currentCommitIndex: CommitIndex,
+                    currentTerm: CurrentTerm,
+                    leaderLastLogIndex: lastIndex,
+                    quorumSize: Cluster.QuorumSize,
+                    followerMatchIndexes: followerMatchIndexes,
+                    getEntryTerm: index =>
+                        _log.GetEntry(index)?.Term
+                        ?? throw new InvalidOperationException(
+                            $"Log entry {index} does not exist."));
+
+            if (newCommitIndex <= CommitIndex)
+                return false;
+
+            CommitIndex = newCommitIndex;
+
+            return true;
+        }
+        finally
+        {
+            _stateLock.Release();
+        }
+    }
+
 }
