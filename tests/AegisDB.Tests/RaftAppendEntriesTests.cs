@@ -396,4 +396,78 @@ public sealed class RaftAppendEntriesTests
     }
 
 
+
+    [Fact]
+    public async Task AppendEntries_Heartbeat_ShouldNotCommitUnverifiedSuffix()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(),
+            "aegisdb-commit-tests",
+            Guid.NewGuid().ToString("N"));
+
+        Directory.CreateDirectory(directory);
+
+        try
+        {
+            var cluster = new RaftClusterConfiguration(
+                ["node-1", "node-2", "node-3"]);
+
+            var stateStore = new RaftStateStore(
+                Path.Combine(directory, "state.json"));
+
+            var logStore = new RaftLogStore(
+                Path.Combine(directory, "log.json"));
+
+            // Seed ten log entries. The first three belong to term 4,
+            // while the remaining entries may be divergent.
+            var entries = Enumerable.Range(1, 10)
+                .Select(index => new RaftLogEntry(
+                    Index: index,
+                    Term: index <= 3 ? 4 : 5,
+                    Command: new WalRecord(
+                        WalOperation.Put,
+                        $"key-{index}",
+                        BitConverter.GetBytes(index))))
+                .ToArray();
+
+            await logStore.SaveAsync(entries);
+
+            var follower = await RaftNode.CreateAsync(
+                "node-2",
+                cluster,
+                stateStore,
+                logStore);
+
+            var initial = await follower.GetStateSnapshotAsync();
+
+            Assert.Equal(10, initial.LastLogIndex);
+            Assert.Equal(0, initial.CommitIndex);
+
+            // The heartbeat verifies only the prefix ending at index 3.
+            // LeaderCommit=8 must NOT commit the unverified suffix.
+            var response = await follower.HandleAppendEntriesAsync(
+                new AppendEntriesRequest(
+                    Term: 6,
+                    LeaderId: "node-1",
+                    PrevLogIndex: 3,
+                    PrevLogTerm: 4,
+                    Entries: [],
+                    LeaderCommit: 8));
+
+            Assert.True(response.Success);
+
+            var snapshot = await follower.GetStateSnapshotAsync();
+
+            Assert.Equal(3, snapshot.CommitIndex);
+            Assert.Equal(10, snapshot.LastLogIndex);
+            Assert.Equal(0, snapshot.LastApplied);
+            Assert.Equal(6, snapshot.CurrentTerm);
+            Assert.Equal(RaftNodeState.Follower, snapshot.State);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
 }
