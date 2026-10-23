@@ -122,4 +122,72 @@ public sealed class RaftConcurrencyTests
     }
 
 
+    [Fact]
+    public async Task StaleHeartbeatResponse_ShouldNotDemoteNewerLeader()
+    {
+        string directory = CreateTestDirectory();
+
+        try
+        {
+            var cluster = new RaftClusterConfiguration(
+                ["node-1", "node-2", "node-3"]);
+
+            var node = await RaftNode.CreateAsync(
+                "node-1",
+                cluster,
+                new RaftStateStore(
+                    Path.Combine(directory, "state.json")));
+
+            // Elect node-1 in term 1.
+            await node.StartElectionAsync();
+
+            await node.ReceiveVoteAsync(
+                voterId: "node-2",
+                term: 1,
+                voteGranted: true,
+                electionTerm: 1);
+
+            Assert.Equal(RaftNodeState.Leader, node.State);
+
+            // Move to term 2 and elect the same node again.
+            await node.BecomeFollowerAsync(2);
+            await node.StartElectionAsync();
+
+            await node.ReceiveVoteAsync(
+                voterId: "node-2",
+                term: 3,
+                voteGranted: true,
+                electionTerm: 3);
+
+            Assert.Equal(RaftNodeState.Leader, node.State);
+
+            // A delayed response from term 1 carries term 3.
+            // It must not demote the current term-3 leader.
+            bool steppedDown =
+                await node.StepDownIfHigherTermAsync(3);
+
+            RaftNodeStateSnapshot snapshot =
+                await node.GetStateSnapshotAsync();
+
+            Assert.False(steppedDown);
+            Assert.Equal(RaftNodeState.Leader, snapshot.State);
+            Assert.Equal(3, snapshot.CurrentTerm);
+
+            // Only a strictly higher term requires stepping down.
+            steppedDown = await node.StepDownIfHigherTermAsync(4);
+
+            snapshot = await node.GetStateSnapshotAsync();
+
+            Assert.True(steppedDown);
+            Assert.Equal(RaftNodeState.Follower, snapshot.State);
+            Assert.Equal(4, snapshot.CurrentTerm);
+            Assert.Null(snapshot.VotedFor);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+
 }

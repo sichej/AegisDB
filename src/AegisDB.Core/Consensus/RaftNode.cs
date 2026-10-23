@@ -166,7 +166,6 @@ public sealed class RaftNode
     }
 
 
-
     /// <summary>
     /// Starts a new Raft election.
     ///
@@ -1031,5 +1030,46 @@ public sealed class RaftNode
             _stateLock.Release();
         }
     }
+
+
+    /// <summary>
+    /// Steps down only when a response reveals a term strictly
+    /// greater than the node's current term.
+    ///
+    /// The comparison and transition use the same state lock,
+    /// preventing delayed RPC responses from demoting a newer leader.
+    /// </summary>
+    public async Task<bool> StepDownIfHigherTermAsync(
+        long observedTerm,
+        CancellationToken cancellationToken = default)
+    {
+        await _stateLock.WaitAsync(cancellationToken);
+
+        try
+        {
+            if (observedTerm <= CurrentTerm)
+                return false;
+
+            // Persist the new term before publishing the transition.
+            if (_stateStore is not null)
+            {
+                await _stateStore.SaveAsync(
+                    new RaftPersistentState(observedTerm, null),
+                    cancellationToken);
+            }
+
+            CurrentTerm = observedTerm;
+            VotedFor = null;
+            State = RaftNodeState.Follower;
+            _votesReceived.Clear();
+
+            return true;
+        }
+        finally
+        {
+            _stateLock.Release();
+        }
+    }
+
 
 }

@@ -39,4 +39,50 @@ public class WalSerializerTests
         Assert.Throws<InvalidDataException>(() =>
             WalSerializer.Deserialize(serialized));
     }
+
+
+    [Fact]
+    public void Serialize_ShouldRejectRecordExceedingReaderLimit()
+    {
+        const string key = "test";
+
+        int maximumValueLength =
+            WalLimits.MaxRecordPayloadBytes -
+            WalLimits.RecordOverheadBytes -
+            Encoding.UTF8.GetByteCount(key);
+
+        var oversizedRecord = new WalRecord(
+            WalOperation.Put,
+            key,
+            new byte[maximumValueLength + 1]);
+
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => WalSerializer.Serialize(oversizedRecord));
+    }
+
+
+    [Fact]
+    public void Serialize_ShouldAcceptRecordAtExactReaderLimit()
+    {
+        const string key = "test";
+
+        int maximumValueLength =
+            WalLimits.MaxRecordPayloadBytes -
+            WalLimits.RecordOverheadBytes -
+            Encoding.UTF8.GetByteCount(key);
+
+        var record = new WalRecord(
+            WalOperation.Put,
+            key,
+            new byte[maximumValueLength]);
+
+        byte[] serialized = WalSerializer.Serialize(record);
+
+        // The four-byte length prefix is outside the payload limit.
+        Assert.Equal(
+            WalLimits.MaxRecordPayloadBytes + sizeof(int),
+            serialized.Length);
+    }
+
+
 }
