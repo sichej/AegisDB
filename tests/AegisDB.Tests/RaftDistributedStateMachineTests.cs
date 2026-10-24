@@ -101,13 +101,6 @@ public sealed class RaftDistributedStateMachineTests
                     Assert.IsType<byte[]>(
                         leaderMachine.Get("user:1"))));
 
-            // Replication does not automatically propagate the
-            // new LeaderCommit yet. Send a heartbeat explicitly.
-            await PropagateCommitAsync(
-                leader,
-                follower,
-                cts.Token);
-
             await WaitForAppliedIndexAsync(
                 follower,
                 putIndex,
@@ -129,10 +122,6 @@ public sealed class RaftDistributedStateMachineTests
 
             Assert.Equal(2, deleteIndex);
 
-            await PropagateCommitAsync(
-                leader,
-                follower,
-                cts.Token);
 
             await WaitForAppliedIndexAsync(
                 follower,

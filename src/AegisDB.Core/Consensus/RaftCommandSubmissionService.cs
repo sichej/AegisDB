@@ -92,8 +92,15 @@ public sealed class RaftCommandSubmissionService
 
                 // Try to advance the commit index and apply
                 // committed entries to the local state machine.
-                await _replicationManager.CommitAndApplyAsync(
-                    cancellationToken);
+                bool commitAdvanced = await _replicationManager.CommitAndApplyAsync(cancellationToken);
+
+                if (commitAdvanced)
+                {
+                    // Inform followers about the newly committed entries.
+                    // A subsequent AppendEntries carries the updated LeaderCommit.
+                    await _replicationManager.ReplicateAllOnceAsync(
+                        cancellationToken);
+                }
 
                 RaftNodeStateSnapshot afterCommit =
                     await _leader.GetStateSnapshotAsync(
