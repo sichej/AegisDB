@@ -30,7 +30,7 @@ public sealed class RaftNodeRuntime
         IEnumerable<string> peerIds,
         TimeSpan? pollInterval = null)
     {
-        _node = node 
+        _node = node
             ?? throw new ArgumentNullException(nameof(node));
 
         _electionService = electionService
@@ -45,7 +45,7 @@ public sealed class RaftNodeRuntime
         _peerIds = peerIds?.ToArray()
             ?? throw new ArgumentNullException(nameof(peerIds));
 
-        _pollInterval = pollInterval 
+        _pollInterval = pollInterval
             ?? TimeSpan.FromMilliseconds(25);
 
         if (_pollInterval <= TimeSpan.Zero)
