@@ -72,7 +72,9 @@ public sealed class RaftNodeRuntimeTests
                 runtimes.Add(new RaftNodeRuntime(
                     node,
                     electionService,
-                    heartbeatService));
+                    heartbeatService,
+                    transport: transport,
+                    peerIds: peers));
 
                 nodes.Add(node);
             }

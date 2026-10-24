@@ -73,7 +73,9 @@ public sealed class RaftLeaderFailoverTests
                 var runtime = new RaftNodeRuntime(
                     node,
                     electionService,
-                    heartbeatService);
+                    heartbeatService,
+                    transport: transport,
+                    peerIds: peers);
 
                 // Each node has an independent shutdown token.
                 var cts = CancellationTokenSource.CreateLinkedTokenSource(
