@@ -287,7 +287,8 @@ public sealed class DistributedKeyValueTests
                     .Features.Get<IServerAddressesFeature>()!.Addresses.Single();
                 return new ClusterHost(app, new HttpClient
                 {
-                    BaseAddress = new Uri(address), Timeout = TimeSpan.FromSeconds(10)
+                    BaseAddress = new Uri(address),
+                    Timeout = TimeSpan.FromSeconds(10)
                 }, directory, nodes.ToArray(), transport, service);
             }
             catch

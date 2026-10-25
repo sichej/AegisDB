@@ -437,7 +437,8 @@ public sealed class NodeLifecycleTests
                     .Get<IServerAddressesFeature>()!.Addresses.Single();
                 return new ClusterHost(app, new HttpClient
                 {
-                    BaseAddress = new Uri(address), Timeout = TimeSpan.FromSeconds(15)
+                    BaseAddress = new Uri(address),
+                    Timeout = TimeSpan.FromSeconds(15)
                 }, directory);
             }
             catch
