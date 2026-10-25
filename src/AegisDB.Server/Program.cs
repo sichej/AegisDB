@@ -4,6 +4,7 @@ using AegisDB.Core.Persistence;
 using AegisDB.Core.Storage;
 using AegisDB.Core.Diagnostics;
 using AegisDB.Server.Monitoring;
+using AegisDB.Server.Distributed;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -46,6 +47,8 @@ builder.Services.AddSingleton<DatabaseEngine>();
 
 builder.Services.AddSingleton<LocalRaftCluster>();
 builder.Services.AddSingleton<IClusterMonitor>(services =>
+    services.GetRequiredService<LocalRaftCluster>());
+builder.Services.AddSingleton<IDistributedKeyValueService>(services =>
     services.GetRequiredService<LocalRaftCluster>());
 builder.Services.AddHostedService(services =>
     services.GetRequiredService<LocalRaftCluster>());

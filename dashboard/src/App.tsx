@@ -1,6 +1,7 @@
 import { applicationPercent, maxIndex } from './api';
 import type { NodeStatus } from './api';
 import { useCluster } from './useCluster';
+import { KeyValueExplorer } from './KeyValueExplorer';
 
 function Metric({ label, value, note }: { label: string; value: string; note: string }) {
   return (
@@ -74,7 +75,7 @@ function NodeCard({ node, stale }: { node: NodeStatus; stale: boolean }) {
 }
 
 export default function App() {
-  const { data, connection, error } = useCluster();
+  const { data, connection, error, refresh } = useCluster();
   const stale = connection === 'disconnected';
   const leaders = data?.nodes.filter(node => node.role === 'Leader' && node.availability === 'Running') ?? [];
 
@@ -160,6 +161,8 @@ export default function App() {
             </section>
           </>
         )}
+
+        <KeyValueExplorer enabled={connection === 'connected' && data?.enabled === true} onCommitted={refresh} />
 
         <aside className="mt-9 rounded-xl border border-slate-800 bg-slate-900/30 p-5 text-xs leading-6 text-slate-400">
           <p className="font-semibold uppercase tracking-wider text-slate-300">Observation scope</p>

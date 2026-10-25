@@ -1,6 +1,7 @@
 using System.Net;
 using AegisDB.Core;
 using AegisDB.Core.Persistence;
+using AegisDB.Server.Distributed;
 using Microsoft.AspNetCore.Http.HttpResults;
 
 namespace AegisDB.Server.Monitoring;
@@ -12,6 +13,9 @@ public static class AdminEndpoints
 {
     public static void MapAdminEndpoints(this WebApplication app)
     {
+        if (!app.Environment.IsDevelopment() && !app.Environment.IsEnvironment("Testing"))
+            return;
+
         RouteGroupBuilder admin = app.MapGroup("/admin")
             .AddEndpointFilter(async (context, next) =>
             {
@@ -27,6 +31,8 @@ public static class AdminEndpoints
                 context.HttpContext.Response.Headers.CacheControl = "no-store";
                 return await next(context);
             });
+
+        admin.MapDistributedKeyValue();
 
         admin.MapGet("/cluster", async (
             IClusterMonitor monitor, CancellationToken cancellationToken) =>

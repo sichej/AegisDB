@@ -6,6 +6,7 @@ using AegisDB.Core.Consensus.Persistence;
 using AegisDB.Core.Persistence;
 using AegisDB.Core.Storage;
 using AegisDB.Server.Monitoring;
+using AegisDB.Server.Distributed;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server;
@@ -70,6 +71,54 @@ public sealed class ClusterMonitoringTests
     }
 
     [Fact]
+    public async Task Explorer_ShouldCommitAndApplyCommandsOnEveryHostedNode()
+    {
+        await using var host = await MonitoringHost.StartAsync(enabled: true);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        ClusterResponse cluster;
+        do
+        {
+            cluster = (await host.Client.GetFromJsonAsync<ClusterResponse>(
+                "/admin/cluster", timeout.Token))!;
+            if (!cluster.Nodes.Any(node => node.Role == "Leader"))
+                await Task.Delay(20, timeout.Token);
+        } while (!cluster.Nodes.Any(node => node.Role == "Leader"));
+
+        using var put = await host.Client.PutAsJsonAsync(
+            "/admin/kv/user:1", new PutValueRequest("{\"name\":\"Alice\"}"), timeout.Token);
+        Assert.Equal(HttpStatusCode.OK, put.StatusCode);
+        var written = (await put.Content.ReadFromJsonAsync<DistributedWriteResponse>(timeout.Token))!;
+        Assert.True(written.Committed);
+        Assert.True(written.Applied);
+        Assert.Equal("3", written.LogIndex);
+        var read = (await host.Client.GetFromJsonAsync<DistributedReadResponse>(
+            "/admin/kv/user:1", timeout.Token))!;
+        Assert.Equal("{\"name\":\"Alice\"}", read.Value);
+        Assert.False(read.Linearizable);
+
+        using var delete = await host.Client.DeleteAsync("/admin/kv/user:1", timeout.Token);
+        Assert.Equal(HttpStatusCode.OK, delete.StatusCode);
+        var deleted = (await delete.Content.ReadFromJsonAsync<DistributedWriteResponse>(timeout.Token))!;
+        Assert.Equal("4", deleted.LogIndex);
+        do
+        {
+            cluster = (await host.Client.GetFromJsonAsync<ClusterResponse>(
+                "/admin/cluster", timeout.Token))!;
+            if (cluster.Nodes.Any(node => node.LastApplied != "4"))
+                await Task.Delay(20, timeout.Token);
+        } while (cluster.Nodes.Any(node => node.LastApplied != "4"));
+
+        Assert.All(cluster.Nodes, node =>
+        {
+            Assert.Equal("4", node.LastLogIndex);
+            Assert.Equal("4", node.CommitIndex);
+            Assert.Equal("4", node.LastApplied);
+        });
+        using var missing = await host.Client.GetAsync("/admin/kv/user:1", timeout.Token);
+        Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
+    }
+
+    [Fact]
     public async Task DisabledCluster_ShouldNotFabricateNodesOrCreateRaftStorage()
     {
         await using var host = await MonitoringHost.StartAsync(enabled: false);
@@ -79,6 +128,9 @@ public sealed class ClusterMonitoringTests
         Assert.Empty(cluster.Nodes);
         Assert.False(Directory.Exists(host.RaftDirectory));
         Assert.Empty((await host.Client.GetFromJsonAsync<NodeStatusResponse[]>("/admin/nodes"))!);
+        using var write = await host.Client.PutAsJsonAsync("/admin/kv/key", new PutValueRequest("value"));
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, write.StatusCode);
+        Assert.False(Directory.Exists(host.RaftDirectory));
     }
 
     [Fact]
@@ -95,10 +147,14 @@ public sealed class ClusterMonitoringTests
     [InlineData("GET", "/admin/nodes")]
     [InlineData("GET", "/admin/nodes/node-1")]
     [InlineData("POST", "/admin/snapshot")]
+    [InlineData("GET", "/admin/kv/test")]
+    [InlineData("DELETE", "/admin/kv/test")]
+    [InlineData("PUT", "/admin/kv/test")]
     public async Task AdminEndpoints_ShouldRejectNonLoopbackClients(string method, string path)
     {
         await using var host = await MonitoringHost.StartAsync(enabled: false, remoteClient: true);
         using var request = new HttpRequestMessage(new HttpMethod(method), path);
+        if (method == "PUT") request.Content = JsonContent.Create(new PutValueRequest("value"));
         using var response = await host.Client.SendAsync(request);
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
         Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
@@ -190,6 +246,8 @@ public sealed class ClusterMonitoringTests
                 builder.Services.AddSingleton<DatabaseEngine>();
                 builder.Services.AddSingleton<LocalRaftCluster>();
                 builder.Services.AddSingleton<IClusterMonitor>(services =>
+                    services.GetRequiredService<LocalRaftCluster>());
+                builder.Services.AddSingleton<IDistributedKeyValueService>(services =>
                     services.GetRequiredService<LocalRaftCluster>());
                 builder.Services.AddHostedService(services =>
                     services.GetRequiredService<LocalRaftCluster>());

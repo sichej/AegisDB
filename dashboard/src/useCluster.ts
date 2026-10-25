@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { fetchCluster } from './api';
 import type { ClusterStatus } from './api';
 
@@ -8,7 +8,9 @@ interface Observation {
   error: string | null;
 }
 
-export function useCluster(): Observation {
+export function useCluster(): Observation & { refresh: () => void } {
+  const [generation, setGeneration] = useState(0);
+  const refresh = useCallback(() => setGeneration(previous => previous + 1), []);
   const [observation, setObservation] = useState<Observation>({
     data: null, connection: 'loading', error: null,
   });
@@ -43,7 +45,7 @@ export function useCluster(): Observation {
       clearTimeout(nextPoll);
       request?.abort();
     };
-  }, []);
+  }, [generation]);
 
-  return observation;
+  return { ...observation, refresh };
 }

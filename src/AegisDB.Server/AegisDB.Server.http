@@ -11,3 +11,15 @@ GET {{AegisDB.Server_HostAddress}}/admin/nodes/node-1
 
 ### Unknown node returns 404 Problem Details
 GET {{AegisDB.Server_HostAddress}}/admin/nodes/unknown
+
+### Distributed PUT (Development/Testing, loopback, enabled local Raft cluster)
+PUT {{AegisDB.Server_HostAddress}}/admin/kv/user:1
+Content-Type: application/json
+
+{"value":"{\"name\":\"Alice\"}"}
+
+### Leader-local applied read (not linearizable)
+GET {{AegisDB.Server_HostAddress}}/admin/kv/user:1
+
+### Distributed DELETE (waits for quorum commitment and application)
+DELETE {{AegisDB.Server_HostAddress}}/admin/kv/user:1

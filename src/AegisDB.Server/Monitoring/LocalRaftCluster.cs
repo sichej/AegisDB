@@ -2,6 +2,8 @@ using System.Globalization;
 using AegisDB.Core.Consensus;
 using AegisDB.Core.Consensus.Persistence;
 using AegisDB.Core.Consensus.Transport;
+using AegisDB.Core.Storage;
+using AegisDB.Server.Distributed;
 
 namespace AegisDB.Server.Monitoring;
 
@@ -12,10 +14,11 @@ namespace AegisDB.Server.Monitoring;
 public sealed class LocalRaftCluster(
     IConfiguration configuration,
     IHostEnvironment environment,
-    ILogger<LocalRaftCluster> logger) : BackgroundService, IClusterMonitor
+    ILogger<LocalRaftCluster> logger) : BackgroundService, IClusterMonitor, IDistributedKeyValueService
 {
     private readonly bool _enabled = configuration.GetValue<bool>("Raft:Enabled");
     private IReadOnlyList<HostedNode> _nodes = [];
+    private RaftKeyValueService? _keyValues;
 
     public override async Task StartAsync(CancellationToken cancellationToken)
     {
@@ -40,6 +43,7 @@ public sealed class LocalRaftCluster(
 
             foreach (string nodeId in members)
             {
+                var store = new KeyValueStore();
                 var timer = new RaftElectionTimer(
                     TimeSpan.FromMilliseconds(500),
                     TimeSpan.FromMilliseconds(1000));
@@ -50,7 +54,8 @@ public sealed class LocalRaftCluster(
                     new RaftStateStore(Path.Combine(directory, $"{nodeId}-state.json")),
                     new RaftLogStore(Path.Combine(directory, $"{nodeId}-log.json")),
                     cancellationToken: cancellationToken,
-                    electionTimer: timer);
+                    electionTimer: timer,
+                    stateMachine: new RaftStateMachine(store));
 
                 transport.Register(node);
 
@@ -62,10 +67,14 @@ public sealed class LocalRaftCluster(
 
                 nodes.Add(new HostedNode(
                     node,
+                    store,
                     new RaftNodeRuntime(node, election, heartbeat, transport, peers)));
             }
 
             _nodes = nodes;
+            _keyValues = new RaftKeyValueService(
+                nodes.Select(node => new RaftKeyValueNode(node.Node, node.Store)).ToArray(),
+                transport);
             logger.LogInformation(
                 "Hosting three local Raft nodes in {Directory}. The /kv API remains independent.",
                 directory);
@@ -84,24 +93,31 @@ public sealed class LocalRaftCluster(
 
         foreach (HostedNode node in _nodes)
         {
-            node.RuntimeTask = RunNodeAsync(node, clusterCancellation);
+            node.RuntimeTask = Task.WhenAll(
+                RunComponentAsync(node.Node.NodeId, "runtime",
+                    () => node.Runtime.RunAsync(clusterCancellation.Token), clusterCancellation),
+                RunComponentAsync(node.Node.NodeId, "application",
+                    () => new RaftStateMachineApplyService(node.Node).RunAsync(clusterCancellation.Token),
+                    clusterCancellation));
         }
 
         await Task.WhenAll(_nodes.Select(node => node.RuntimeTask!));
     }
 
-    private async Task RunNodeAsync(
-        HostedNode node,
+    private async Task RunComponentAsync(
+        string nodeId,
+        string component,
+        Func<Task> run,
         CancellationTokenSource clusterCancellation)
     {
         try
         {
-            await node.Runtime.RunAsync(clusterCancellation.Token);
+            await run();
 
             if (!clusterCancellation.IsCancellationRequested)
             {
                 throw new InvalidOperationException(
-                    $"Raft runtime {node.Node.NodeId} stopped unexpectedly.");
+                    $"Raft {component} for {nodeId} stopped unexpectedly.");
             }
         }
         catch (OperationCanceledException) when (clusterCancellation.IsCancellationRequested)
@@ -110,7 +126,7 @@ public sealed class LocalRaftCluster(
         }
         catch (Exception exception)
         {
-            logger.LogError(exception, "Raft runtime {NodeId} failed.", node.Node.NodeId);
+            logger.LogError(exception, "Raft {Component} for {NodeId} failed.", component, nodeId);
             await clusterCancellation.CancelAsync();
             throw;
         }
@@ -152,9 +168,26 @@ public sealed class LocalRaftCluster(
             statuses);
     }
 
-    private sealed class HostedNode(RaftNode node, RaftNodeRuntime runtime)
+    public Task<DistributedWriteResponse> PutAsync(
+        string key, string value, CancellationToken cancellationToken) =>
+        RequireKeyValues().PutAsync(key, value, cancellationToken);
+
+    public Task<DistributedWriteResponse> DeleteAsync(
+        string key, CancellationToken cancellationToken) =>
+        RequireKeyValues().DeleteAsync(key, cancellationToken);
+
+    public Task<DistributedReadResponse> GetAsync(
+        string key, CancellationToken cancellationToken) =>
+        RequireKeyValues().GetAsync(key, cancellationToken);
+
+    private RaftKeyValueService RequireKeyValues() =>
+        _keyValues ?? throw new DistributedOperationException(
+            503, "cluster_disabled", "The local Raft cluster is disabled.", "not-submitted");
+
+    private sealed class HostedNode(RaftNode node, KeyValueStore store, RaftNodeRuntime runtime)
     {
         public RaftNode Node { get; } = node;
+        public KeyValueStore Store { get; } = store;
         public RaftNodeRuntime Runtime { get; } = runtime;
         public Task? RuntimeTask { get; set; }
     }

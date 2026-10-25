@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { applicationPercent, maxIndex, parseCluster } from './api.ts';
+import { applicationPercent, DistributedApiError, executeKeyValue, maxIndex, parseCluster } from './api.ts';
 
 const node = {
   nodeId: 'test-node',
@@ -47,4 +47,96 @@ test('rejects numeric or invalid index fields', () => {
 test('zero committed entries and empty observations do not imply application progress', () => {
   assert.equal(applicationPercent({ ...node, commitIndex: '0', lastApplied: '0' }), 0);
   assert.equal(maxIndex([]), '0');
+});
+
+test('PUT uses only the distributed endpoint and preserves text and Int64 receipts', async t => {
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async (url: string, options: RequestInit) => {
+    calls++;
+    assert.equal(url, '/admin/kv/user%3A1');
+    assert.equal(options.method, 'PUT');
+    assert.equal(options.body, JSON.stringify({ value: '{"name":"Alice"}' }));
+    return Response.json({
+      key: 'user:1', operation: 'PUT', leaderId: 'node-2',
+      logIndex: '9007199254740993', term: '5', committed: true, applied: true,
+    });
+  });
+  const result = await executeKeyValue('PUT', 'user:1', '{"name":"Alice"}', new AbortController().signal);
+  assert.equal(result.kind, 'write');
+  if (result.kind === 'write') assert.equal(result.response.logIndex, '9007199254740993');
+  assert.equal(calls, 1);
+});
+
+test('GET exposes non-linearizable reads and accepts an empty committed value', async t => {
+  t.mock.method(globalThis, 'fetch', async (_url: string, options: RequestInit) => {
+    assert.equal(options.method, 'GET');
+    assert.equal(options.body, undefined);
+    return Response.json({
+      key: 'empty', value: '', leaderId: 'node-1', term: '1', lastApplied: '2',
+      consistency: 'leader-local-applied', linearizable: false,
+    });
+  });
+  const result = await executeKeyValue('GET', 'empty', '', new AbortController().signal);
+  assert.equal(result.kind, 'read');
+  if (result.kind === 'read') assert.equal(result.response.value, '');
+});
+
+test('timeouts preserve unknown outcomes and never automatically retry writes', async t => {
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async () => {
+    calls++;
+    return Response.json({
+      title: 'confirmation_timeout', detail: 'The command may still commit.',
+      outcome: 'unknown', automaticRetry: false,
+    }, { status: 504 });
+  });
+  await assert.rejects(
+    executeKeyValue('DELETE', 'key', '', new AbortController().signal),
+    error => error instanceof DistributedApiError
+      && error.outcome === 'unknown' && /may still commit/.test(error.message),
+  );
+  assert.equal(calls, 1);
+});
+
+test('unconfirmed writes cannot render as successful operations', async t => {
+  t.mock.method(globalThis, 'fetch', async () => Response.json({
+    key: 'key', operation: 'PUT', leaderId: 'node-1', logIndex: '1', term: '1',
+    committed: true, applied: false,
+  }));
+  await assert.rejects(
+    executeKeyValue('PUT', 'key', 'value', new AbortController().signal),
+    error => error instanceof DistributedApiError && error.outcome === 'unknown',
+  );
+});
+
+test('non-JSON gateway errors are not write confirmations', async t => {
+  t.mock.method(globalThis, 'fetch', async () => new Response('Bad gateway', { status: 502 }));
+  await assert.rejects(
+    executeKeyValue('PUT', 'key', 'value', new AbortController().signal),
+    error => error instanceof DistributedApiError && error.outcome === 'unknown',
+  );
+});
+
+test('connection failures are surfaced without resubmitting commands', async t => {
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async () => {
+    calls++;
+    throw new TypeError('Failed to fetch');
+  });
+  await assert.rejects(
+    executeKeyValue('PUT', 'key', 'value', new AbortController().signal),
+    /Failed to fetch/,
+  );
+  assert.equal(calls, 1);
+});
+
+test('GET rejects unsupported consistency claims', async t => {
+  t.mock.method(globalThis, 'fetch', async () => Response.json({
+    key: 'key', value: 'value', leaderId: 'node-1', term: '1', lastApplied: '1',
+    consistency: 'linearizable', linearizable: true,
+  }));
+  await assert.rejects(
+    executeKeyValue('GET', 'key', '', new AbortController().signal),
+    /invalid confirmation/,
+  );
 });

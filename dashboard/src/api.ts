@@ -59,3 +59,95 @@ export function applicationPercent(node: NodeStatus): number {
   const applied = BigInt(node.lastApplied);
   return Number((applied > committed ? committed : applied) * 100n / committed);
 }
+
+export interface DistributedWrite {
+  key: string;
+  operation: 'PUT' | 'DELETE';
+  leaderId: string;
+  logIndex: string;
+  term: string;
+  committed: true;
+  applied: true;
+}
+
+export interface DistributedRead {
+  key: string;
+  value: string;
+  leaderId: string;
+  term: string;
+  lastApplied: string;
+  consistency: 'leader-local-applied';
+  linearizable: false;
+}
+
+export type KeyValueResult =
+  | { kind: 'write'; response: DistributedWrite }
+  | { kind: 'read'; response: DistributedRead };
+
+export class DistributedApiError extends Error {
+  readonly outcome: string;
+
+  constructor(message: string, outcome: string) {
+    super(message);
+    this.name = 'DistributedApiError';
+    this.outcome = outcome;
+  }
+}
+
+function isIndex(value: unknown): value is string {
+  return typeof value === 'string' && /^\d+$/.test(value);
+}
+
+function isWrite(value: unknown): value is DistributedWrite {
+  return isRecord(value) && typeof value.key === 'string'
+    && (value.operation === 'PUT' || value.operation === 'DELETE')
+    && typeof value.leaderId === 'string' && value.leaderId.length > 0
+    && isIndex(value.logIndex) && isIndex(value.term)
+    && value.committed === true && value.applied === true;
+}
+
+function isRead(value: unknown): value is DistributedRead {
+  return isRecord(value) && typeof value.key === 'string' && typeof value.value === 'string'
+    && typeof value.leaderId === 'string' && value.leaderId.length > 0
+    && isIndex(value.term) && isIndex(value.lastApplied)
+    && value.consistency === 'leader-local-applied' && value.linearizable === false;
+}
+
+export async function executeKeyValue(
+  method: 'PUT' | 'GET' | 'DELETE',
+  key: string,
+  value: string,
+  signal: AbortSignal,
+): Promise<KeyValueResult> {
+  const response = await fetch(`/admin/kv/${encodeURIComponent(key)}`, {
+    method,
+    signal,
+    cache: 'no-store',
+    ...(method === 'PUT' ? {
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value }),
+    } : {}),
+  });
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new DistributedApiError(
+      `Distributed API returned HTTP ${response.status} without a valid JSON response.`,
+      method === 'GET' ? 'not-applicable' : 'unknown',
+    );
+  }
+  if (!response.ok) {
+    const detail = isRecord(payload) && typeof payload.detail === 'string'
+      ? payload.detail : `Distributed API returned HTTP ${response.status}.`;
+    const outcome = isRecord(payload) && typeof payload.outcome === 'string'
+      ? payload.outcome : method === 'GET' ? 'not-applicable' : 'unknown';
+    throw new DistributedApiError(detail, outcome);
+  }
+  if (method === 'GET' && isRead(payload)) return { kind: 'read', response: payload };
+  if (method !== 'GET' && isWrite(payload) && payload.operation === method) {
+    return { kind: 'write', response: payload };
+  }
+  throw new DistributedApiError('Distributed API returned an invalid confirmation.',
+    method === 'GET' ? 'not-applicable' : 'unknown');
+}
