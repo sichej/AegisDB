@@ -1,8 +1,11 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
+using System.Net.Http.Json;
 using System.Net.Sockets;
 using System.Text;
+using AegisDB.Server.Distributed;
+using AegisDB.Server.Monitoring;
 
 namespace AegisDB.Tests;
 
@@ -43,7 +46,8 @@ public sealed class CrashRecoveryTests
     private static Process StartServer(
     string baseUrl,
     string walPath,
-    string? faultDirectory = null)
+    string? faultDirectory = null,
+    bool raftEnabled = false)
     {
         string serverDllPath = GetServerDllPath();
 
@@ -64,6 +68,9 @@ public sealed class CrashRecoveryTests
         startInfo.Environment["Storage__WalPath"] = walPath;
         startInfo.Environment["Storage__SnapshotPath"] = Path.Combine(Path.GetDirectoryName(walPath)!, "test.snapshot");
         startInfo.Environment["ASPNETCORE_ENVIRONMENT"] = "Testing";
+        startInfo.Environment["Raft__Enabled"] = raftEnabled.ToString();
+        startInfo.Environment["Raft__DataDirectory"] =
+            Path.Combine(Path.GetDirectoryName(walPath)!, "raft");
 
         // Enable cross-process fault injection only when requested.
         if (faultDirectory is not null)
@@ -186,6 +193,53 @@ public sealed class CrashRecoveryTests
             Path.GetTempPath(), $"aegis-crash-{Guid.NewGuid():N}");
         Directory.CreateDirectory(path);
         return path;
+    }
+
+    [Fact]
+    public async Task Server_ShouldKeepLegacyEndpointsIndependentFromDistributedCommands()
+    {
+        string testDirectory = CreateTestDirectory();
+        string baseUrl = $"http://127.0.0.1:{GetAvailablePort()}";
+        Process? server = null;
+        try
+        {
+            server = StartServer(baseUrl, Path.Combine(testDirectory, "test.wal"), raftEnabled: true);
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            await WaitForServerReadyAsync(server, baseUrl, timeout.Token);
+            using var client = new HttpClient { BaseAddress = new Uri(baseUrl) };
+            ClusterResponse cluster;
+            do
+            {
+                cluster = (await client.GetFromJsonAsync<ClusterResponse>(
+                    "/admin/cluster", timeout.Token))!;
+                if (!cluster.Nodes.Any(node => node.Role == "Leader"))
+                    await Task.Delay(20, timeout.Token);
+            } while (!cluster.Nodes.Any(node => node.Role == "Leader"));
+
+            using var legacyPut = await client.PutAsync(
+                "/kv/user:1", new StringContent("legacy"), timeout.Token);
+            Assert.Equal(HttpStatusCode.NoContent, legacyPut.StatusCode);
+            using var distributedMissing = await client.GetAsync("/admin/kv/user:1", timeout.Token);
+            Assert.Equal(HttpStatusCode.NotFound, distributedMissing.StatusCode);
+
+            using var distributedPut = await client.PutAsJsonAsync(
+                "/admin/kv/user:1", new PutValueRequest("distributed"), timeout.Token);
+            Assert.Equal(HttpStatusCode.OK, distributedPut.StatusCode);
+            Assert.Equal("legacy", await client.GetStringAsync("/kv/user:1", timeout.Token));
+            Assert.Equal("distributed", (await client.GetFromJsonAsync<DistributedReadResponse>(
+                "/admin/kv/user:1", timeout.Token))!.Value);
+            using var legacyDelete = await client.DeleteAsync("/kv/user:1", timeout.Token);
+            Assert.Equal(HttpStatusCode.NoContent, legacyDelete.StatusCode);
+            Assert.Equal("distributed", (await client.GetFromJsonAsync<DistributedReadResponse>(
+                "/admin/kv/user:1", timeout.Token))!.Value);
+            using var missing = await client.GetAsync("/kv/user:1", timeout.Token);
+            Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
+        }
+        finally
+        {
+            if (server is not null) await StopServerAsync(server);
+            Directory.Delete(testDirectory, recursive: true);
+        }
     }
 
     [Fact]
