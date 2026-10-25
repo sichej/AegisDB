@@ -1,6 +1,37 @@
 @AegisDB.Server_HostAddress = http://localhost:5140
 
-GET {{AegisDB.Server_HostAddress}}/weatherforecast/
-Accept: application/json
+### Local cluster overview (enable with Raft__Enabled=true)
+GET {{AegisDB.Server_HostAddress}}/admin/cluster
 
-###
+### All locally hosted nodes
+GET {{AegisDB.Server_HostAddress}}/admin/nodes
+
+### One real Raft node
+GET {{AegisDB.Server_HostAddress}}/admin/nodes/node-1
+
+### Unknown node returns 404 Problem Details
+GET {{AegisDB.Server_HostAddress}}/admin/nodes/unknown
+
+### Distributed PUT (Development/Testing, loopback, enabled local Raft cluster)
+PUT {{AegisDB.Server_HostAddress}}/admin/kv/user:1
+Content-Type: application/json
+
+{"value":"{\"name\":\"Alice\"}"}
+
+### Leader-local applied read (not linearizable)
+GET {{AegisDB.Server_HostAddress}}/admin/kv/user:1
+
+### Distributed DELETE (waits for quorum commitment and application)
+DELETE {{AegisDB.Server_HostAddress}}/admin/kv/user:1
+
+### Stop a local node (preserves Raft files and voting membership)
+POST {{AegisDB.Server_HostAddress}}/admin/nodes/node-1/stop
+
+### Start a stopped node using a fresh instance and its persisted files
+POST {{AegisDB.Server_HostAddress}}/admin/nodes/node-1/start
+
+### Restart a local node (Stop/drain then Start)
+POST {{AegisDB.Server_HostAddress}}/admin/nodes/node-1/restart
+
+### Invalid member ID returns 404 Problem Details
+POST {{AegisDB.Server_HostAddress}}/admin/nodes/unknown/stop
