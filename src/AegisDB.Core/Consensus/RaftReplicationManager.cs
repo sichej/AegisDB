@@ -92,6 +92,7 @@ public sealed class RaftReplicationManager
                 "Replication manager no longer owns the current leadership term.");
         }
 
+
         async Task<(string PeerId, bool Success)> ReplicatePeerAsync(
             KeyValuePair<string, RaftLogReplicator> pair)
         {
@@ -102,20 +103,14 @@ public sealed class RaftReplicationManager
 
                 return (pair.Key, success);
             }
-            catch (OperationCanceledException)
-                when (cancellationToken.IsCancellationRequested)
+            catch (RaftTransportException)
             {
-                throw;
-            }
-            catch (Exception ex)
-                when (ex is not OperationCanceledException)
-            {
-                // A failed peer does not prevent replication
-                // attempts to the remaining peers.
-                // Structured logging will be added in the server.
+                // The follower is temporarily unreachable.
+                // Other peers may still provide a quorum.
                 return (pair.Key, false);
             }
         }
+
 
         var results = await Task.WhenAll(
             _replicators.Select(ReplicatePeerAsync));
