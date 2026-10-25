@@ -4,13 +4,14 @@ using AegisDB.Core.Consensus;
 using AegisDB.Core.Consensus.Transport;
 using AegisDB.Core.Persistence;
 using AegisDB.Core.Storage;
+using AegisDB.Server.Monitoring;
 
 namespace AegisDB.Server.Distributed;
 
 /// <summary>
 /// Associates a Raft node with the same store injected into its state machine.
 /// </summary>
-public sealed record RaftKeyValueNode(RaftNode Node, KeyValueStore Store);
+public sealed record RaftKeyValueNode(RaftNode Node, KeyValueStore Store, NodeLifetime? Lifetime = null);
 
 /// <summary>
 /// Submits each write once through existing Raft services and observes leader-local applied reads.
@@ -20,7 +21,7 @@ public sealed class RaftKeyValueService : IDistributedKeyValueService
     public const int MaxKeyBytes = 1024;
     public const int MaxValueBytes = 1024 * 1024;
 
-    private readonly IReadOnlyList<RaftKeyValueNode> _nodes;
+    private readonly Func<IReadOnlyList<RaftKeyValueNode>> _getNodes;
     private readonly IRaftTransport _transport;
     private readonly TimeSpan _timeout;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
@@ -29,8 +30,17 @@ public sealed class RaftKeyValueService : IDistributedKeyValueService
         IReadOnlyList<RaftKeyValueNode> nodes,
         IRaftTransport transport,
         TimeSpan? timeout = null)
+        : this(() => nodes, transport, timeout)
     {
-        _nodes = nodes ?? throw new ArgumentNullException(nameof(nodes));
+        ArgumentNullException.ThrowIfNull(nodes);
+    }
+
+    public RaftKeyValueService(
+        Func<IReadOnlyList<RaftKeyValueNode>> getNodes,
+        IRaftTransport transport,
+        TimeSpan? timeout = null)
+    {
+        _getNodes = getNodes ?? throw new ArgumentNullException(nameof(getNodes));
         _transport = transport ?? throw new ArgumentNullException(nameof(transport));
         _timeout = timeout ?? TimeSpan.FromSeconds(5);
         if (_timeout <= TimeSpan.Zero)
@@ -74,8 +84,13 @@ public sealed class RaftKeyValueService : IDistributedKeyValueService
             await _writeLock.WaitAsync(deadline.Token);
             entered = true;
             (leader, term) = await ResolveLeaderAsync(deadline.Token);
+            using IDisposable? lease = leader.Lifetime?.TryAcquire();
+            if (leader.Lifetime is not null && lease is null)
+                throw LeaderStopped(submitted: false);
+            using var nodeCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                deadline.Token, leader.Lifetime?.Token ?? CancellationToken.None);
 
-            string[] peers = _nodes
+            string[] peers = _getNodes()
                 .Where(node => node.Node.NodeId != leader.Node.NodeId)
                 .Select(node => node.Node.NodeId)
                 .ToArray();
@@ -84,8 +99,8 @@ public sealed class RaftKeyValueService : IDistributedKeyValueService
 
             // Never retry SubmitAsync: its internal retries replicate the one appended entry.
             submissionStarted = true;
-            long index = await submission.SubmitAsync(command, deadline.Token);
-            RaftNodeStateSnapshot state = await leader.Node.GetStateSnapshotAsync(deadline.Token);
+            long index = await submission.SubmitAsync(command, nodeCancellation.Token);
+            RaftNodeStateSnapshot state = await leader.Node.GetStateSnapshotAsync(nodeCancellation.Token);
             RaftLogEntry entry = leader.Node.Log.GetEntry(index)
                 ?? throw new InvalidOperationException("The confirmed Raft entry is missing.");
 
@@ -117,6 +132,8 @@ public sealed class RaftKeyValueService : IDistributedKeyValueService
                     "The request was cancelled. An already submitted command may still commit; cancellation is not rollback.",
                     outcome, exception);
             }
+            if (leader?.Lifetime?.Token.IsCancellationRequested == true)
+                throw LeaderStopped(submissionStarted, exception);
 
             throw new DistributedOperationException(
                 504, "confirmation_timeout",
@@ -144,13 +161,20 @@ public sealed class RaftKeyValueService : IDistributedKeyValueService
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(_timeout);
 
+        RaftKeyValueNode? selected = null;
         try
         {
             (RaftKeyValueNode leader, long term) = await ResolveLeaderAsync(deadline.Token);
-            await leader.Node.ApplyCommittedEntriesAsync(deadline.Token);
+            selected = leader;
+            using IDisposable? lease = leader.Lifetime?.TryAcquire();
+            if (leader.Lifetime is not null && lease is null)
+                throw LeaderStopped(submitted: false);
+            using var nodeCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                deadline.Token, leader.Lifetime?.Token ?? CancellationToken.None);
+            await leader.Node.ApplyCommittedEntriesAsync(nodeCancellation.Token);
             byte[]? value = leader.Store.Get(key);
             RaftNodeStateSnapshot afterRead =
-                await leader.Node.GetStateSnapshotAsync(deadline.Token);
+                await leader.Node.GetStateSnapshotAsync(nodeCancellation.Token);
 
             if (afterRead.State != RaftNodeState.Leader || afterRead.CurrentTerm != term)
                 throw LeadershipChanged();
@@ -166,6 +190,9 @@ public sealed class RaftKeyValueService : IDistributedKeyValueService
         }
         catch (OperationCanceledException exception)
         {
+            if (!cancellationToken.IsCancellationRequested &&
+                selected?.Lifetime?.Token.IsCancellationRequested == true)
+                throw LeaderStopped(submitted: false, exception);
             throw new DistributedOperationException(
                 cancellationToken.IsCancellationRequested ? 408 : 504,
                 cancellationToken.IsCancellationRequested ? "request_cancelled" : "read_timeout",
@@ -178,8 +205,9 @@ public sealed class RaftKeyValueService : IDistributedKeyValueService
         CancellationToken cancellationToken)
     {
         var observations = new List<(RaftKeyValueNode Node, RaftNodeStateSnapshot State)>();
-        foreach (RaftKeyValueNode node in _nodes)
+        foreach (RaftKeyValueNode node in _getNodes())
         {
+            if (node.Lifetime is { IsAvailable: false }) continue;
             observations.Add((node, await node.Node.GetStateSnapshotAsync(cancellationToken)));
         }
 
@@ -197,6 +225,12 @@ public sealed class RaftKeyValueService : IDistributedKeyValueService
 
         return (leaders[0].Node, highestTerm);
     }
+
+    private static DistributedOperationException LeaderStopped(
+        bool submitted, Exception? innerException = null) =>
+        new(409, "leader_stopped",
+            "The selected leader was stopped. A submitted command may still commit; no automatic resubmission was performed.",
+            submitted ? "unknown" : "not-submitted", innerException);
 
     private static DistributedOperationException LeadershipChanged(Exception? innerException = null) =>
         new(409, "leadership_changed",

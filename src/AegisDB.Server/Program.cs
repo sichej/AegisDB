@@ -50,6 +50,8 @@ builder.Services.AddSingleton<IClusterMonitor>(services =>
     services.GetRequiredService<LocalRaftCluster>());
 builder.Services.AddSingleton<IDistributedKeyValueService>(services =>
     services.GetRequiredService<LocalRaftCluster>());
+builder.Services.AddSingleton<INodeLifecycleManager>(services =>
+    services.GetRequiredService<LocalRaftCluster>());
 builder.Services.AddHostedService(services =>
     services.GetRequiredService<LocalRaftCluster>());
 

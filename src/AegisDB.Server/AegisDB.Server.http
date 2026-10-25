@@ -23,3 +23,15 @@ GET {{AegisDB.Server_HostAddress}}/admin/kv/user:1
 
 ### Distributed DELETE (waits for quorum commitment and application)
 DELETE {{AegisDB.Server_HostAddress}}/admin/kv/user:1
+
+### Stop a local node (preserves Raft files and voting membership)
+POST {{AegisDB.Server_HostAddress}}/admin/nodes/node-1/stop
+
+### Start a stopped node using a fresh instance and its persisted files
+POST {{AegisDB.Server_HostAddress}}/admin/nodes/node-1/start
+
+### Restart a local node (Stop/drain then Start)
+POST {{AegisDB.Server_HostAddress}}/admin/nodes/node-1/restart
+
+### Invalid member ID returns 404 Problem Details
+POST {{AegisDB.Server_HostAddress}}/admin/nodes/unknown/stop

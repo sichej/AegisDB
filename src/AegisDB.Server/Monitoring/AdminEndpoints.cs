@@ -7,7 +7,7 @@ using Microsoft.AspNetCore.Http.HttpResults;
 namespace AegisDB.Server.Monitoring;
 
 /// <summary>
-/// Maps loopback-only monitoring and the existing local snapshot endpoint.
+/// Maps development-only loopback monitoring, local node controls, and snapshot operations.
 /// </summary>
 public static class AdminEndpoints
 {
@@ -33,6 +33,8 @@ public static class AdminEndpoints
             });
 
         admin.MapDistributedKeyValue();
+        if (app.Configuration.GetValue<bool>("Raft:Enabled"))
+            admin.MapNodeLifecycle();
 
         admin.MapGet("/cluster", async (
             IClusterMonitor monitor, CancellationToken cancellationToken) =>

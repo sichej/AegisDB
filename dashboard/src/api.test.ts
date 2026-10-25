@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { applicationPercent, DistributedApiError, executeKeyValue, maxIndex, parseCluster } from './api.ts';
+import { applicationPercent, changeNode, DistributedApiError, executeKeyValue, maxIndex, parseCluster } from './api.ts';
 
 const node = {
   nodeId: 'test-node',
@@ -139,4 +139,41 @@ test('GET rejects unsupported consistency claims', async t => {
     executeKeyValue('GET', 'key', '', new AbortController().signal),
     /invalid confirmation/,
   );
+});
+
+test('node controls POST to the real admin endpoint and require confirmed availability', async t => {
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async (url: string, options: RequestInit) => {
+    calls++;
+    assert.equal(url, '/admin/nodes/test-node/stop');
+    assert.equal(options.method, 'POST');
+    return Response.json({ ...node, availability: 'Stopped' });
+  });
+  assert.equal((await changeNode('test-node', 'stop', new AbortController().signal)).availability, 'Stopped');
+  assert.equal(calls, 1);
+});
+
+test('lifecycle errors are surfaced without optimistic success or retries', async t => {
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async () => {
+    calls++;
+    return Response.json({ detail: 'Another lifecycle operation is in progress.' }, { status: 409 });
+  });
+  await assert.rejects(changeNode('test-node', 'restart', new AbortController().signal), /in progress/);
+  assert.equal(calls, 1);
+});
+
+test('start cannot succeed with a stopped or wrong-node response', async t => {
+  const mock = t.mock.method(globalThis, 'fetch', async () => Response.json({ ...node, availability: 'Stopped' }));
+  await assert.rejects(changeNode('test-node', 'start', new AbortController().signal), /invalid confirmation/);
+  mock.mock.mockImplementation(async () => Response.json({ ...node, nodeId: 'other', availability: 'Running' }));
+  await assert.rejects(changeNode('test-node', 'restart', new AbortController().signal), /invalid confirmation/);
+});
+
+test('monitoring accepts actual stopping transitions', () => {
+  const status = parseCluster({
+    enabled: true, mode: 'local-in-process', availabilityDescription: 'Local tasks',
+    observedAt: new Date().toISOString(), nodes: [{ ...node, availability: 'Stopping' }],
+  });
+  assert.equal(status.nodes[0].availability, 'Stopping');
 });

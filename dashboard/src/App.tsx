@@ -2,6 +2,7 @@ import { applicationPercent, maxIndex } from './api';
 import type { NodeStatus } from './api';
 import { useCluster } from './useCluster';
 import { KeyValueExplorer } from './KeyValueExplorer';
+import { NodeControls } from './NodeControls';
 
 function Metric({ label, value, note }: { label: string; value: string; note: string }) {
   return (
@@ -13,8 +14,10 @@ function Metric({ label, value, note }: { label: string; value: string; note: st
   );
 }
 
-function NodeCard({ node, stale }: { node: NodeStatus; stale: boolean }) {
-  const leader = node.role === 'Leader';
+function NodeCard({ node, stale, onRefresh }: {
+  node: NodeStatus; stale: boolean; onRefresh: () => void;
+}) {
+  const leader = node.role === 'Leader' && node.availability === 'Running';
   const progress = applicationPercent(node);
   const fields = [
     ['Current term', node.currentTerm],
@@ -34,7 +37,7 @@ function NodeCard({ node, stale }: { node: NodeStatus; stale: boolean }) {
             <h3 className="mt-2 font-mono text-lg font-semibold">{node.nodeId}</h3>
           </div>
           <span className={leader ? 'badge border-cyan-700 text-cyan-300' : 'badge text-slate-300'}>
-            {stale ? `Last seen: ${node.role}` : node.role}
+            {stale || node.availability !== 'Running' ? `Last role: ${node.role}` : node.role}
           </span>
         </div>
         <p className="mt-5 flex items-center gap-2 text-xs text-slate-400">
@@ -69,6 +72,7 @@ function NodeCard({ node, stale }: { node: NodeStatus; stale: boolean }) {
             {node.commitIndex === '0' ? 'No committed entries yet' : `${progress}% of committed entries applied`}
           </p>
         </div>
+        <NodeControls node={node} stale={stale} onRefresh={onRefresh} />
       </div>
     </article>
   );
@@ -156,7 +160,7 @@ export default function App() {
               {data.nodes.length === 0
                 ? <p className="panel p-6 text-slate-400">No local node observations are available.</p>
                 : <div className={`grid gap-5 md:grid-cols-2 xl:grid-cols-3 ${stale ? 'opacity-60' : ''}`}>
-                  {data.nodes.map(node => <NodeCard key={node.nodeId} node={node} stale={stale} />)}
+                  {data.nodes.map(node => <NodeCard key={node.nodeId} node={node} stale={stale} onRefresh={refresh} />)}
                 </div>}
             </section>
           </>
@@ -167,7 +171,7 @@ export default function App() {
         <aside className="mt-9 rounded-xl border border-slate-800 bg-slate-900/30 p-5 text-xs leading-6 text-slate-400">
           <p className="font-semibold uppercase tracking-wider text-slate-300">Observation scope</p>
           <p className="mt-2">{data?.availabilityDescription ?? 'Local runtime availability is not network reachability or quorum health.'}</p>
-          <p>The /kv API uses its existing independent WAL engine. Its writes do not enter these Raft logs. Node stop/restart controls are not exposed.</p>
+          <p>The /kv API uses its existing independent WAL engine. Its writes do not enter these Raft logs. Node controls affect only this local development cluster; voting membership stays fixed.</p>
         </aside>
       </main>
       <footer className="mx-auto max-w-7xl px-5 pb-8 text-xs text-slate-600 sm:px-8">

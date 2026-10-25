@@ -6,7 +6,7 @@ export interface NodeStatus {
   lastApplied: string;
   lastLogIndex: string;
   lastLogTerm: string;
-  availability: 'Starting' | 'Running' | 'Stopped' | 'Faulted';
+  availability: 'Starting' | 'Running' | 'Stopping' | 'Stopped' | 'Faulted';
 }
 
 export interface ClusterStatus {
@@ -26,7 +26,7 @@ function isNode(value: unknown): value is NodeStatus {
   const indices = ['currentTerm', 'commitIndex', 'lastApplied', 'lastLogIndex', 'lastLogTerm'];
   return typeof value.nodeId === 'string' && value.nodeId.length > 0
     && ['Follower', 'Candidate', 'Leader'].includes(String(value.role))
-    && ['Starting', 'Running', 'Stopped', 'Faulted'].includes(String(value.availability))
+    && ['Starting', 'Running', 'Stopping', 'Stopped', 'Faulted'].includes(String(value.availability))
     && indices.every(key => typeof value[key] === 'string' && /^\d+$/.test(value[key]));
 }
 
@@ -47,6 +47,31 @@ export async function fetchCluster(signal: AbortSignal): Promise<ClusterStatus> 
   const response = await fetch('/admin/cluster', { signal, cache: 'no-store' });
   if (!response.ok) throw new Error(`Monitoring API returned HTTP ${response.status}.`);
   return parseCluster(await response.json());
+}
+
+export type NodeAction = 'stop' | 'start' | 'restart';
+
+export async function changeNode(
+  nodeId: string, action: NodeAction, signal: AbortSignal,
+): Promise<NodeStatus> {
+  const response = await fetch(`/admin/nodes/${encodeURIComponent(nodeId)}/${action}`, {
+    method: 'POST', signal, cache: 'no-store',
+  });
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new Error(`Node control returned HTTP ${response.status} without valid JSON. Refresh node status before retrying.`);
+  }
+  if (!response.ok) {
+    throw new Error(isRecord(payload) && typeof payload.detail === 'string'
+      ? payload.detail : `Node control returned HTTP ${response.status}.`);
+  }
+  if (!isNode(payload) || payload.nodeId !== nodeId
+    || payload.availability !== (action === 'stop' ? 'Stopped' : 'Running')) {
+    throw new Error('Node control returned an invalid confirmation. Refresh node status before retrying.');
+  }
+  return payload;
 }
 
 export function maxIndex(values: string[]): string {
