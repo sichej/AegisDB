@@ -49,13 +49,17 @@ public sealed class InMemoryRaftTransport : IRaftTransport
         return node.HandleAppendEntriesAsync(request, cancellationToken);
     }
 
+    /// <summary>
+    /// Resolves a Raft node from the in-memory transport registry.
+    /// Throws a transport exception when the target node is unreachable.
+    /// </summary>
     private RaftNode ResolveNode(string nodeId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(nodeId);
 
         if (!_nodes.TryGetValue(nodeId, out RaftNode? node))
         {
-            throw new InvalidOperationException(
+            throw new RaftTransportException(
                 $"Node '{nodeId}' is not registered.");
         }
 
