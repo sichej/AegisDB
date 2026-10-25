@@ -3,6 +3,7 @@ using AegisDB.Core;
 using AegisDB.Core.Persistence;
 using AegisDB.Core.Storage;
 using AegisDB.Core.Diagnostics;
+using AegisDB.Server.Monitoring;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -42,6 +43,12 @@ builder.Services.AddSingleton(new SnapshotStore(snapshotPath));
 
 // Register the database engine.
 builder.Services.AddSingleton<DatabaseEngine>();
+
+builder.Services.AddSingleton<LocalRaftCluster>();
+builder.Services.AddSingleton<IClusterMonitor>(services =>
+    services.GetRequiredService<LocalRaftCluster>());
+builder.Services.AddHostedService(services =>
+    services.GetRequiredService<LocalRaftCluster>());
 
 // Register OpenAPI services.
 builder.Services.AddOpenApi();
@@ -106,23 +113,7 @@ if (!app.Environment.IsEnvironment("Testing"))
     app.UseHttpsRedirection();
 }
 
-// Creates a persistent snapshot of the current database state.
-// Intended for local development and testing.
-app.MapPost("/admin/snapshot", async (
-    DatabaseEngine db,
-    SnapshotStore snapshotStore,
-    CancellationToken cancellationToken) =>
-{
-    Snapshot snapshot = await db.CreateSnapshotAsync(cancellationToken);
-
-    await snapshotStore.SaveAsync(snapshot, cancellationToken);
-
-    return Results.Ok(new
-    {
-        walOffset = snapshot.WalOffset,
-        entries = snapshot.Data.Count
-    });
-});
+app.MapAdminEndpoints();
 
 // Readiness is available only after WAL recovery completes.
 app.MapGet("/health", () => Results.Ok("Healthy"));

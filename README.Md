@@ -14,6 +14,7 @@ AegisDB is organized into two main components:
 
 - **AegisDB.Core** — Storage engine, persistence, recovery, and Raft consensus implementation.
 - **AegisDB.Server** — HTTP API exposing database operations.
+- **dashboard** — Read-only React/TypeScript monitoring UI for an opt-in local Raft cluster.
 
 ### Single-node storage
 
@@ -91,6 +92,7 @@ AegisDB/
 │   └── AegisDB.Server/
 ├── tests/
 │   └── AegisDB.Tests/
+├── dashboard/
 ├── .github/
 │   └── workflows/
 ├── AegisDB.slnx
@@ -102,6 +104,7 @@ AegisDB/
 ### Requirements
 
 - .NET 10 SDK
+- Node.js 22.12+ and npm (for the dashboard)
 
 ### Build
 
@@ -121,6 +124,101 @@ dotnet run --project src/AegisDB.Server
 ```bash
 dotnet test AegisDB.slnx
 ```
+
+## Local Cluster Dashboard
+
+The server normally hosts **no Raft nodes**: `/kv` continues to use the existing
+single-node database engine, WAL, snapshots, and recovery.
+
+For local monitoring, opt into three real Raft nodes hosted in one server process:
+
+```bash
+Raft__Enabled=true dotnet run --project src/AegisDB.Server --launch-profile http
+```
+
+This starts the backend at `http://localhost:5140`. The cluster uses the existing
+`RaftNodeRuntime`, elections, and replication services with one shared
+`InMemoryRaftTransport`. All nodes are registered before their runtimes start.
+The host cancels and joins the runtimes on shutdown; a runtime failure is logged,
+cancels its siblings, and fails the hosted service instead of silently restarting.
+The in-process mode is accepted only in Development or Testing and is disabled
+by default. Do not start two server instances using the same storage directory.
+
+Raft term/vote metadata and logs are stored separately under
+`src/AegisDB.Server/data/raft` when using the command above. Override this with
+`Raft__DataDirectory=/absolute/path/to/raft-data`. Recovery uses the existing
+Raft implementation: commit/application indices are volatile, and this MVP does
+not add state-machine snapshot recovery.
+
+In another terminal:
+
+```bash
+cd dashboard
+npm ci
+npm run dev
+```
+
+Open **http://127.0.0.1:5173**. Vite proxies `/admin` to
+`http://127.0.0.1:5140`, so no permissive CORS configuration is required.
+Both the development server and monitoring access are intended for loopback use.
+Do not publish this development proxy or forward public requests to the admin
+routes; loopback restriction is not authentication for a public reverse proxy.
+
+### Monitoring API
+
+| Endpoint | Response |
+|---|---|
+| `GET /admin/cluster` | Hosting mode, observation time, scope description, and local nodes |
+| `GET /admin/nodes` | All local node observations |
+| `GET /admin/nodes/{id}` | One local node, or 404 Problem Details |
+
+Each node reports its actual ID, role, current term, commit index, last applied
+index, last log index/term, and local runtime availability. State comes from
+`GetStateSnapshotAsync()`. Terms and indices are JSON decimal strings to avoid
+losing 64-bit integer precision in JavaScript. Availability means the local
+runtime task is starting/running/stopped/faulted, **not network reachability,
+quorum health, or a distributed health check**. Snapshots are consistent per
+node, not atomic across the cluster.
+
+The dashboard polls after each request with an approximately one-second interval,
+times out stalled requests, retries failures, and labels retained observations as
+stale while disconnected. When the cluster is disabled, the API returns no nodes
+and the dashboard explains how to enable it rather than displaying sample data.
+
+All `/admin` endpoints, including the existing mutation endpoint
+`POST /admin/snapshot`, reject non-loopback clients. The monitoring endpoints are
+read-only; no node stop/restart, fault injection, or simulation control API is
+provided.
+
+### MVP boundaries
+
+- The three nodes run real Raft but share one process and failure domain.
+- `/kv` writes **do not enter the Raft logs**. The dashboard's indices may remain
+  zero until commands are submitted through the consensus layer; no background
+  demo traffic or fabricated progress is generated.
+- Raft persistence is independent of the single-node database storage.
+- Multi-process clusters and HTTP/gRPC Raft transport are not yet supported.
+  Hosting lives in the Server project, monitoring depends on `IClusterMonitor`,
+  and the consensus runtime already accepts `IRaftTransport`, so a future host
+  or transport can be added without dashboard-specific consensus changes.
+- `npm run build` produces static assets in `dashboard/dist`; deployment behind
+  an authenticated gateway is outside this local-only MVP. Vite preview serves
+  the assets but is not configured as a monitoring API gateway.
+
+### Dashboard validation
+
+```bash
+dotnet test AegisDB.slnx
+cd dashboard
+npm run typecheck
+npm test
+npm run build
+```
+
+The backend tests use real local HTTP listeners and hosted Raft nodes; they cover
+status responses, persisted-log observations, disabled mode, access restrictions,
+missing nodes, and shutdown. Frontend tests cover response validation and
+64-bit-safe progress calculations.
 
 ## Engineering Goals
 

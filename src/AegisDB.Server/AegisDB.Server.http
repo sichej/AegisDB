@@ -1,6 +1,13 @@
 @AegisDB.Server_HostAddress = http://localhost:5140
 
-GET {{AegisDB.Server_HostAddress}}/weatherforecast/
-Accept: application/json
+### Local cluster overview (enable with Raft__Enabled=true)
+GET {{AegisDB.Server_HostAddress}}/admin/cluster
 
-###
+### All locally hosted nodes
+GET {{AegisDB.Server_HostAddress}}/admin/nodes
+
+### One real Raft node
+GET {{AegisDB.Server_HostAddress}}/admin/nodes/node-1
+
+### Unknown node returns 404 Problem Details
+GET {{AegisDB.Server_HostAddress}}/admin/nodes/unknown

@@ -20,6 +20,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\AegisDB.Core\AegisDB.Core.csproj" />
+    <ProjectReference Include="..\..\src\AegisDB.Server\AegisDB.Server.csproj" />
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
 
 </Project>
