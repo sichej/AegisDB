@@ -31,6 +31,22 @@ public sealed class RaftLogStore
     {
         ArgumentNullException.ThrowIfNull(entries);
 
+        // Validate the entire log image before any filesystem mutation.
+        for (int i = 0; i < entries.Count; i++)
+        {
+            RaftLogEntry? entry = entries[i];
+
+            if (entry is null ||
+                entry.Index != i + 1L ||
+                entry.Term < 0 ||
+                !RaftCommandValidator.IsValid(entry.Command))
+            {
+                throw new ArgumentException(
+                    $"Invalid Raft log entry at position {i}.",
+                    nameof(entries));
+            }
+        }
+
         await _lock.WaitAsync(cancellationToken);
 
         try
@@ -115,13 +131,7 @@ public sealed class RaftLogStore
                 if (entry is null ||
                     entry.Index != i + 1L ||
                     entry.Term < 0 ||
-                    entry.Command is null ||
-                    string.IsNullOrEmpty(entry.Command.Key) ||
-                    !Enum.IsDefined(entry.Command.Operation) ||
-                    (entry.Command.Operation == WalOperation.Put &&
-                     entry.Command.Value is null) ||
-                    (entry.Command.Operation == WalOperation.Delete &&
-                     entry.Command.Value is not null))
+                    !RaftCommandValidator.IsValid(entry.Command))
                 {
                     throw new InvalidDataException(
                         $"Invalid Raft log entry at position {i}.");

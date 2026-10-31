@@ -699,12 +699,7 @@ public sealed class RaftNode
                     entry.Term > request.Term ||
                     entry.Command is null ||
                     string.IsNullOrEmpty(entry.Command.Key) ||
-                    (entry.Command.Operation == WalOperation.Put &&
-                     entry.Command.Value is null) ||
-                    (entry.Command.Operation == WalOperation.Delete &&
-                     entry.Command.Value is not null) ||
-                    (entry.Command.Operation != WalOperation.Put &&
-                     entry.Command.Operation != WalOperation.Delete))
+                    !RaftCommandValidator.IsValid(entry.Command))
                 {
                     return new AppendEntriesResponse(CurrentTerm, false);
                 }
@@ -1157,11 +1152,16 @@ public sealed class RaftNode
     {
         ArgumentNullException.ThrowIfNull(command);
 
-        // Take ownership of the caller's buffer before awaiting.
+        // Take ownership of the caller's mutable value buffer
+        // before validation or asynchronous operations.
         var ownedCommand = new WalRecord(
             command.Operation,
             command.Key,
             command.Value?.ToArray());
+
+        // Reject invalid commands before entering the state lock
+        // or performing any persistent operation.
+        RaftCommandValidator.Validate(ownedCommand);
 
         await _stateLock.WaitAsync(cancellationToken);
 
