@@ -101,4 +101,138 @@ public class DatabaseEngineTests
                 File.Delete(filePath);
         }
     }
+
+
+    [Fact]
+    public async Task PutAsync_ShouldNotRetainCallerOwnedBuffer()
+    {
+        string filePath = Path.Combine(
+            Path.GetTempPath(),
+            $"{Guid.NewGuid():N}.wal");
+
+        try
+        {
+            var wal = new WriteAheadLog(filePath);
+            var store = new KeyValueStore();
+            var database = new DatabaseEngine(store, wal);
+
+            byte[] originalValue = [1, 2, 3];
+
+            await database.PutAsync("user:1", originalValue);
+
+            // Mutate the original buffer after submission.
+            originalValue[0] = 99;
+            originalValue[1] = 88;
+
+            byte[]? liveValue = database.Get("user:1");
+
+            Assert.Equal(new byte[] { 1, 2, 3 }, liveValue);
+
+            // Rebuild the store using only the persisted WAL.
+            var recoveredStore = new KeyValueStore();
+            var recoveredWal = new WriteAheadLog(filePath);
+
+            var recovery = new RecoveryManager(
+                recoveredWal,
+                recoveredStore);
+
+            await recovery.RecoverAsync();
+
+            Assert.Equal(
+                new byte[] { 1, 2, 3 },
+                recoveredStore.Get("user:1"));
+
+            Assert.Equal(liveValue, recoveredStore.Get("user:1"));
+        }
+        finally
+        {
+            if (File.Exists(filePath))
+                File.Delete(filePath);
+        }
+    }
+
+
+    [Fact]
+    public async Task PutAsync_WhenCallerMutatesBufferWhileWaitingForLock_ShouldPersistOriginalValue()
+    {
+        string filePath = Path.Combine(
+            Path.GetTempPath(),
+            $"{Guid.NewGuid():N}.wal");
+
+        try
+        {
+            var wal = new WriteAheadLog(filePath);
+            var store = new KeyValueStore();
+            var database = new DatabaseEngine(store, wal);
+
+            byte[] originalValue = [1, 2, 3];
+            byte[] expectedValue = [1, 2, 3];
+
+            // Hold the engine's write lock to create a deterministic
+            // suspension point before the pending PUT can proceed.
+            var lockField = typeof(DatabaseEngine).GetField(
+                "_writeLock",
+                System.Reflection.BindingFlags.Instance |
+                System.Reflection.BindingFlags.NonPublic);
+
+            Assert.NotNull(lockField);
+
+            var writeLock = Assert.IsType<SemaphoreSlim>(
+                lockField.GetValue(database));
+
+            await writeLock.WaitAsync();
+
+            Task putTask;
+
+            try
+            {
+                // The PUT must capture its own copy before awaiting the lock.
+                putTask = database.PutAsync("user:1", originalValue);
+
+                Assert.False(putTask.IsCompleted);
+
+                // Mutate the caller-owned buffer while PUT is suspended.
+                originalValue[0] = 99;
+                originalValue[1] = 88;
+                originalValue[2] = 77;
+            }
+            finally
+            {
+                writeLock.Release();
+            }
+
+            await putTask;
+
+            // The live store must contain the value captured at submission.
+            Assert.Equal(
+                expectedValue,
+                database.Get("user:1"));
+
+            // Recover the database exclusively from the persisted WAL.
+            var recoveredStore = new KeyValueStore();
+            var recoveredWal = new WriteAheadLog(filePath);
+
+            var recovery = new RecoveryManager(
+                recoveredWal,
+                recoveredStore);
+
+            await recovery.RecoverAsync();
+
+            // The recovered value must match the original submission.
+            Assert.Equal(
+                expectedValue,
+                recoveredStore.Get("user:1"));
+
+            // Live and recovered states must agree byte-for-byte.
+            Assert.Equal(
+                database.Get("user:1"),
+                recoveredStore.Get("user:1"));
+        }
+        finally
+        {
+            if (File.Exists(filePath))
+                File.Delete(filePath);
+        }
+    }
+
 }

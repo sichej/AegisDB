@@ -23,12 +23,17 @@ public sealed class DatabaseEngine
     /// Persists a mutation before applying it to the in-memory state.
     /// Concurrent mutations are processed in a consistent order.
     /// </summary>
+
     public async Task PutAsync(
         string key,
         byte[] value,
         CancellationToken cancellationToken = default)
     {
-        // Acquire the write lock to ensure exclusive access for this mutation.
+        ArgumentNullException.ThrowIfNull(value);
+
+        // Take ownership of the caller's buffer before the first await.
+        byte[] ownedValue = value.ToArray();
+
         await _writeLock.WaitAsync(cancellationToken);
 
         try
@@ -36,18 +41,20 @@ public sealed class DatabaseEngine
             var record = new WalRecord(
                 WalOperation.Put,
                 key,
-                value
+                ownedValue
             );
 
+            // Persist the owned value before applying it in memory.
             await _wal.AppendAsync(record, cancellationToken);
 
-            _store.Put(key, value);
+            _store.Put(key, ownedValue);
         }
         finally
         {
             _writeLock.Release();
         }
     }
+
 
     public byte[]? Get(string key)
     {
