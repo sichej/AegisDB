@@ -1,4 +1,7 @@
 <Solution>
+  <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/AegisDB.Benchmarks/AegisDB.Benchmarks.csproj" />
+  </Folder>
   <Folder Name="/src/">
     <Project Path="src/AegisDB.Core/AegisDB.Core.csproj" />
     <Project Path="src/AegisDB.Server/AegisDB.Server.csproj" />
