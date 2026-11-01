@@ -14,50 +14,50 @@ namespace AegisDB.Benchmarks.Persistence;
   iterationCount: 10)]
 public class WalBatchBenchmarks
 {
-  private string _filePath = null!;
-  private WriteAheadLog _wal = null!;
-  private WalRecord _record = null!;
+    private string _filePath = null!;
+    private WriteAheadLog _wal = null!;
+    private WalRecord _record = null!;
 
-  [Params(128, 1024, 16384)]
-  public int ValueSize { get; set; }
+    [Params(128, 1024, 16384)]
+    public int ValueSize { get; set; }
 
-  [GlobalSetup]
-  public void Setup()
-  {
-    _filePath = Path.Combine(
-      Path.GetTempPath(),
-      $"aegisdb-batch-{Guid.NewGuid():N}.wal");
-
-    byte[] value = new byte[ValueSize];
-    new Random(42).NextBytes(value);
-
-    _record = new WalRecord(
-      WalOperation.Put,
-      "benchmark-key",
-      value);
-
-    _wal = new WriteAheadLog(_filePath);
-  }
-
-  [IterationSetup]
-  public void ResetWal()
-  {
-    File.WriteAllBytes(_filePath, []);
-  }
-
-  [Benchmark(OperationsPerInvoke = 100)]
-  public async Task AppendBatch100()
-  {
-    for (int i = 0; i < 100; i++)
+    [GlobalSetup]
+    public void Setup()
     {
-      await _wal.AppendAsync(_record);
-    }
-  }
+        _filePath = Path.Combine(
+          Path.GetTempPath(),
+          $"aegisdb-batch-{Guid.NewGuid():N}.wal");
 
-  [GlobalCleanup]
-  public void Cleanup()
-  {
-    if (File.Exists(_filePath))
-      File.Delete(_filePath);
-  }
+        byte[] value = new byte[ValueSize];
+        new Random(42).NextBytes(value);
+
+        _record = new WalRecord(
+          WalOperation.Put,
+          "benchmark-key",
+          value);
+
+        _wal = new WriteAheadLog(_filePath);
+    }
+
+    [IterationSetup]
+    public void ResetWal()
+    {
+        File.WriteAllBytes(_filePath, []);
+    }
+
+    [Benchmark(OperationsPerInvoke = 100)]
+    public async Task AppendBatch100()
+    {
+        for (int i = 0; i < 100; i++)
+        {
+            await _wal.AppendAsync(_record);
+        }
+    }
+
+    [GlobalCleanup]
+    public void Cleanup()
+    {
+        if (File.Exists(_filePath))
+            File.Delete(_filePath);
+    }
 }
